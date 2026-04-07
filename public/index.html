@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gestão de Perdas</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-logo" aria-hidden="true">GP</div>
+        <div>
+          <h1>Painel de Perdas</h1>
+          <p>Gestão operacional com importação de XML, classificação e histórico persistido no Supabase.</p>
+        </div>
+      </div>
+
+      <nav class="side-nav" aria-label="Navegação principal">
+        <button class="side-link tabbtn is-active" data-tab="dash" type="button">Visão Geral</button>
+        <button class="side-link tabbtn" data-tab="classif" type="button">Classificação</button>
+        <button class="side-link tabbtn" data-tab="items" type="button">Itens</button>
+      </nav>
+
+      <div class="side-footer">
+        <strong>Fluxo ativo</strong>
+        <span>Importe XMLs, grave automaticamente no banco e acompanhe o dashboard sem sincronização manual.</span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="wrap">
+        <header class="topbar">
+          <div class="title-block">
+            <span class="eyebrow">Gestão de perdas</span>
+            <h2>Dashboard operacional com atualização automática</h2>
+            <p>Os dados são carregados do Supabase ao abrir a página. Novos XMLs entram como fluxo principal e atualizam filtros, tabelas e indicadores automaticamente.</p>
+          </div>
+
+          <div class="toolbar toolbar-top">
+            <button id="jsonBtn" type="button">Exportar JSON</button>
+            <button id="csvBtn" type="button">Exportar CSV</button>
+            <button id="reportBtn" type="button">Relatório A4</button>
+            <button id="clearBtn" type="button" class="danger-btn">Limpar base</button>
+          </div>
+        </header>
+
+        <section class="panel hero-panel">
+          <div class="hero-grid">
+            <div>
+              <span class="hero-chip">Importação principal</span>
+              <h3>Entrada por XML com persistência real</h3>
+              <p class="panel-copy">Selecione um ou vários XMLs. O sistema processa os arquivos, evita duplicidade por identificador único e salva os registros diretamente no Supabase.</p>
+            </div>
+
+            <div class="hero-actions">
+              <label class="file-picker" for="xmlFiles">Selecionar XMLs</label>
+              <input type="file" id="xmlFiles" accept=".xml,text/xml" multiple hidden>
+              <select id="basis">
+                <option value="competence">Base: Competência</option>
+                <option value="emission">Base: Emissão</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="filters">
+            <select id="storeFilter"><option value="TODAS">Todas as lojas</option></select>
+            <select id="typeFilter"><option value="TODOS">Todos os tipos</option></select>
+            <select id="sectorFilter"><option value="TODOS">Todos os setores</option></select>
+            <select id="reasonFilter"><option value="TODOS">Todos os motivos</option></select>
+            <select id="monthFilter"><option value="TODOS">Todos os meses</option></select>
+          </div>
+
+          <div id="statusBanner" class="status info">Carregando dados do banco...</div>
+        </section>
+
+        <section id="dash" class="tab is-active">
+          <div class="cards">
+            <article class="card"><div class="label">Total de notas</div><div class="value" id="kpiNotes">0</div><div class="meta">Notas disponíveis no recorte atual</div></article>
+            <article class="card"><div class="label">Valor total</div><div class="value" id="kpiTotal">R$ 0,00</div><div class="meta">Volume consolidado</div></article>
+            <article class="card"><div class="label">Perdas</div><div class="value" id="kpiLoss">R$ 0,00</div><div class="meta">Saídas classificadas como perdas</div></article>
+            <article class="card"><div class="label">Uso/Consumo</div><div class="value" id="kpiUsage">R$ 0,00</div><div class="meta">Uso interno no período</div></article>
+            <article class="card"><div class="label">Loja com maior impacto</div><div class="value" id="kpiStore">-</div><div class="meta">Maior valor no filtro atual</div></article>
+          </div>
+
+          <div class="grid2">
+            <section class="panel chart-panel">
+              <div class="panel-head">
+                <div>
+                  <h3>Movimentação mensal</h3>
+                  <p class="muted-note">Acompanhe a evolução de perdas e uso/consumo por período.</p>
+                </div>
+              </div>
+              <div class="chart-box monthly"><canvas id="monthChart"></canvas></div>
+            </section>
+
+            <section class="panel chart-panel">
+              <div class="panel-head">
+                <div>
+                  <h3>Distribuição</h3>
+                  <p class="muted-note">Visão resumida por tipo ou por motivo, conforme o filtro aplicado.</p>
+                </div>
+              </div>
+              <div class="chart-box type"><canvas id="typeChart"></canvas></div>
+            </section>
+          </div>
+
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head"><div><h3>Resumo por loja</h3><p class="muted-note">Comparativo entre notas, perdas e uso/consumo por loja.</p></div></div>
+              <div class="mini" id="storesBody"><div class="empty">Nenhum XML importado ainda.</div></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head"><div><h3>Resumo por setor</h3><p class="muted-note">Setores com maior peso e motivos predominantes.</p></div></div>
+              <div class="mini" id="sectorBox"><div class="empty">Nenhum XML importado ainda.</div></div>
+            </section>
+          </div>
+
+          <section class="panel section-gap">
+            <div class="panel-head"><div><h3>Ranking de produtos</h3><p class="muted-note">Produtos consolidados com base no recorte atual de loja, tipo, setor, motivo e mês.</p></div></div>
+            <div id="productRanking" class="rank-list"><div class="empty">Nenhum XML importado ainda.</div></div>
+          </section>
+        </section>
+
+        <section id="classif" class="tab">
+          <div class="split">
+            <section class="panel">
+              <div class="panel-head"><div><h3>Classificação por item</h3><p class="muted-note">Selecione uma nota e classifique itens individualmente ou em lote. Tudo é salvo automaticamente.</p></div></div>
+              <div class="toolbar">
+                <select id="noteStoreFilter"><option value="TODAS">Todas as lojas</option></select>
+                <select id="noteMonthFilter"><option value="TODOS">Todos os meses</option></select>
+                <select id="noteSelect"><option value="">Selecione uma nota</option></select>
+              </div>
+              <div class="toolbar">
+                <select id="applyAll"><option value="">Aplicar para todos</option></select>
+                <button id="applyAllBtn" type="button">Aplicar</button>
+                <select id="applySelected"><option value="">Aplicar para selecionados</option></select>
+                <button id="applySelectedBtn" type="button">Selecionados</button>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th><input type="checkbox" id="selectAll" aria-label="Selecionar todos"></th><th>Produto</th><th>Qtd</th><th>Valor</th><th>Motivo</th></tr></thead>
+                  <tbody id="classBody"><tr><td colspan="5"><div class="empty">Selecione uma nota para começar a classificação.</div></td></tr></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head"><div><h3>Resumo da nota</h3><p class="muted-note">Revisão rápida antes de salvar classificações e ajustes de setor.</p></div></div>
+              <div id="noteSummary" class="mini"><div class="empty">Nenhuma nota selecionada.</div></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="items" class="tab">
+          <section class="panel">
+            <div class="panel-head"><div><h3>Itens detalhados</h3><p class="muted-note">Lista completa dos itens importados com pesquisa por produto e filtros ativos.</p></div></div>
+            <div class="toolbar"><input type="search" id="productSearch" placeholder="Pesquisar produto"></div>
+            <div id="productSummary"><div class="empty">Pesquise um produto para ver resumo por período, notas e motivos.</div></div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Emissão</th><th>Competência</th><th>Loja</th><th>Tipo</th><th>Setor</th><th>Nota</th><th>Produto</th><th>Qtd</th><th>Valor</th><th>Motivo</th></tr></thead>
+                <tbody id="itemsBody"><tr><td colspan="10"><div class="empty">Nenhum XML importado ainda.</div></td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="loadingOverlay" class="loading-overlay" hidden>
+    <div class="loading-card">
+      <div class="spinner" aria-hidden="true"></div>
+      <strong>Processando dados</strong>
+      <span id="loadingText">Aguarde enquanto o sistema atualiza as informações.</span>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
