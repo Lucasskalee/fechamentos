@@ -1,5 +1,5 @@
 import { groupItemsByNote, normalizeReason } from "./services/classificacao.js";
-import { clearDatabase, deleteNote, importXmlFiles, loadAllItems, updateItemField, updateReasonForNote, updateSectorForNote } from "./services/importacao.js";
+import { clearDatabase, deleteNote, getPersistenceInfo, importXmlFiles, loadAllItems, updateItemField, updateReasonForNote, updateSectorForNote } from "./services/importacao.js";
 import { applyFilters, buildNoteOptions, refreshFilters } from "./services/filtros.js";
 import { exportCsv, exportJson, openPrintReport, renderClassification, renderDashboard, renderItems } from "./services/dashboard.js";
 import { subscribeRealtime } from "./services/realtime.js";
@@ -93,7 +93,13 @@ async function reloadFromDatabase({ loadingMessage, statusMessage, emptyMessage 
     const items = await loadAllItems();
     syncState(items);
     refreshUi();
-    if (state.items.length) setStatus("success", statusMessage || `${state.items.length} itens carregados em ${state.notes.length} nota(s).`);
+    const persistence = getPersistenceInfo();
+    if (persistence.mode === "local") {
+      const message = state.items.length
+        ? `${persistence.detail} ${state.items.length} itens carregados em ${state.notes.length} nota(s).`
+        : `${persistence.detail} Nenhum XML importado ainda.`;
+      setStatus("warning", message);
+    } else if (state.items.length) setStatus("success", statusMessage || `${state.items.length} itens carregados em ${state.notes.length} nota(s).`);
     else setStatus("info", emptyMessage || "Nenhum XML importado ainda.");
   } catch (error) {
     setStatus("error", error.userMessage || "Não foi possível carregar os dados do painel.");
