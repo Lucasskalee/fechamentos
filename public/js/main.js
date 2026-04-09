@@ -1,8 +1,9 @@
 import { groupItemsByNote, normalizeReason } from "./services/classificacao.js";
-import { clearDatabase, deleteNote, getPersistenceInfo, importXmlFiles, loadAllItems, updateItemField, updateReasonForNote, updateSectorForNote } from "./services/importacao.js";
+import { clearDatabase, deleteNote, getPersistenceInfo, importXmlFiles, loadAllData, updateItemField, updateReasonForNote, updateSectorForNote } from "./services/importacao.js";
 import { applyFilters, buildNoteOptions, refreshFilters } from "./services/filtros.js";
-import { exportCsv, exportJson, openPrintReport, renderClassification, renderDashboard, renderItems } from "./services/dashboard.js";
+import { exportCsv, openPrintReport, renderClassification, renderDashboard, renderItems } from "./services/dashboard.js";
 import { subscribeRealtime } from "./services/realtime.js";
+import { initUi, touchLastSync } from "./services/ui.js";
 
 const refs = {
   basis: document.getElementById("basis"),
@@ -21,7 +22,7 @@ const refs = {
   selectAll: document.getElementById("selectAll"),
   xmlFiles: document.getElementById("xmlFiles"),
   productSearch: document.getElementById("productSearch"),
-  jsonBtn: document.getElementById("jsonBtn"),
+  pendingOnlyBtn: document.getElementById("pendingOnlyBtn"),
   csvBtn: document.getElementById("csvBtn"),
   reportBtn: document.getElementById("reportBtn"),
   clearBtn: document.getElementById("clearBtn"),
@@ -34,15 +35,34 @@ const refs = {
   productRanking: document.getElementById("productRanking"),
   monthChart: document.getElementById("monthChart"),
   typeChart: document.getElementById("typeChart"),
+  pendingExecutive: document.getElementById("pendingExecutive"),
+  pendingExecutiveTitle: document.getElementById("pendingExecutiveTitle"),
+  pendingExecutiveText: document.getElementById("pendingExecutiveText"),
+  pendingExecutiveBadge: document.getElementById("pendingExecutiveBadge"),
+  pendingItemsCount: document.getElementById("pendingItemsCount"),
+  pendingNotesCount: document.getElementById("pendingNotesCount"),
+  pendingCompletion: document.getElementById("pendingCompletion"),
+  pendingFocus: document.getElementById("pendingFocus"),
+  pendingFocusMeta: document.getElementById("pendingFocusMeta"),
+  pendingKpiCard: document.getElementById("pendingKpiCard"),
   kpiNotes: document.getElementById("kpiNotes"),
   kpiTotal: document.getElementById("kpiTotal"),
   kpiLoss: document.getElementById("kpiLoss"),
   kpiUsage: document.getElementById("kpiUsage"),
+  kpiPending: document.getElementById("kpiPending"),
+  kpiPendingMeta: document.getElementById("kpiPendingMeta"),
   kpiStore: document.getElementById("kpiStore"),
   statusBanner: document.getElementById("statusBanner"),
   loadingOverlay: document.getElementById("loadingOverlay"),
   loadingText: document.getElementById("loadingText"),
-  toast: document.getElementById("toast")
+  toast: document.getElementById("toast"),
+  themeToggle: document.getElementById("themeToggle"),
+  themeToggleLabel: document.getElementById("themeToggleLabel"),
+  currentDate: document.getElementById("currentDate"),
+  currentWeekday: document.getElementById("currentWeekday"),
+  currentTime: document.getElementById("currentTime"),
+  connectionBadge: document.getElementById("connectionBadge"),
+  lastSyncLabel: document.getElementById("lastSyncLabel")
 };
 
 const state = {
@@ -53,29 +73,52 @@ const state = {
   typeChart: null,
   realtimeCleanup: null,
   realtimeTimer: null,
-  toastTimer: null
+  toastTimer: null,
+  uiCleanup: null
 };
 
 function setStatus(type, message) {
   refs.statusBanner.className = `status ${type}`;
   refs.statusBanner.textContent = message;
+  if (refs.connectionBadge) {
+    const labelMap = {
+      info: "Sincronizacao em observacao",
+      success: "Operacao sincronizada",
+      warning: "Atencao ao modo atual",
+      error: "Falha na sincronizacao"
+    };
+    refs.connectionBadge.textContent = labelMap[type] || "Painel operacional";
+  }
+  touchLastSync(refs, "Status atualizado");
 }
 
-function showToast(message) {
+function showToast(type, message, duration = 3200) {
   clearTimeout(state.toastTimer);
+  refs.toast.className = `toast ${type}`;
   refs.toast.textContent = message;
   refs.toast.hidden = false;
-  state.toastTimer = window.setTimeout(() => { refs.toast.hidden = true; }, 3200);
+  if (duration > 0) {
+    state.toastTimer = window.setTimeout(() => {
+      refs.toast.hidden = true;
+    }, duration);
+  }
 }
 
-function setLoading(active, message = "Aguarde enquanto o sistema atualiza as informações.") {
+function hideToast() {
+  clearTimeout(state.toastTimer);
+  refs.toast.hidden = true;
+}
+
+function setLoading(active, message = "Aguarde enquanto o sistema atualiza as informacoes.") {
   refs.loadingText.textContent = message;
   refs.loadingOverlay.hidden = !active;
 }
 
-function syncState(items) {
-  state.items = items.map((item) => ({ ...item, reason: normalizeReason(item.reason) })).sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
-  state.notes = groupItemsByNote(state.items);
+function syncState(database) {
+  state.items = (database.items || [])
+    .map((item) => ({ ...item, reason: normalizeReason(item.reason) }))
+    .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
+  state.notes = groupItemsByNote(state.items, database.notes || []);
 }
 
 function refreshUi() {
@@ -90,19 +133,28 @@ function refreshUi() {
 async function reloadFromDatabase({ loadingMessage, statusMessage, emptyMessage } = {}) {
   try {
     if (loadingMessage) setLoading(true, loadingMessage);
-    const items = await loadAllItems();
-    syncState(items);
+    const database = await loadAllData();
+    syncState(database);
     refreshUi();
     const persistence = getPersistenceInfo();
     if (persistence.mode === "local") {
       const message = state.items.length
-        ? `${persistence.detail} ${state.items.length} itens carregados em ${state.notes.length} nota(s).`
-        : `${persistence.detail} Nenhum XML importado ainda.`;
+        ? `${persistence.detail} Fonte oficial: Supabase. Exibindo ${state.items.length} itens e ${state.notes.length} nota(s) do fallback temporario.`
+        : `${persistence.detail} Fonte oficial: Supabase. Nenhum XML visivel no fallback temporario.`;
       setStatus("warning", message);
+    } else if (persistence.mode === "remote_partial") {
+      const noteMessage = state.notes.length
+        ? `${state.notes.length} nota(s) oficial(is) carregada(s) do banco.`
+        : "Nenhuma nota oficial foi encontrada no banco.";
+      const itemMessage = state.items.length
+        ? ` ${state.items.length} item(ns) tambem foram carregados.`
+        : " Os itens ainda nao puderam ser lidos do banco.";
+      setStatus("warning", `${noteMessage}${itemMessage} ${persistence.detail}`.trim());
     } else if (state.items.length) setStatus("success", statusMessage || `${state.items.length} itens carregados em ${state.notes.length} nota(s).`);
+    else if (state.notes.length) setStatus("success", statusMessage || `${state.notes.length} nota(s) carregada(s) do banco.`);
     else setStatus("info", emptyMessage || "Nenhum XML importado ainda.");
   } catch (error) {
-    setStatus("error", error.userMessage || "Não foi possível carregar os dados do painel.");
+    setStatus("error", error.userMessage || "Nao foi possivel carregar os dados do painel.");
   } finally {
     setLoading(false);
   }
@@ -122,7 +174,7 @@ function setTab(targetId) {
 
 function updateLocalItem(itemId, patch) {
   state.items = state.items.map((item) => (item.id === itemId ? { ...item, ...patch } : item));
-  state.notes = groupItemsByNote(state.items);
+  state.notes = groupItemsByNote(state.items, state.notes);
   state.filtered = applyFilters(state, refs);
   renderDashboard(state, refs);
   renderItems(state, refs);
@@ -131,44 +183,79 @@ function updateLocalItem(itemId, patch) {
 
 async function handleImport(files) {
   if (!files.length) return;
+  const totalFiles = files.length;
   try {
-    setLoading(true, "Processando XMLs e salvando no Supabase...");
+    setStatus("info", `Importando ${totalFiles} XML(s) para o banco de dados...`);
+    showToast("info", `Importacao iniciada. Enviando ${totalFiles} XML(s) ao Supabase...`, 0);
+    setLoading(true, `Importando ${totalFiles} XML(s) para o banco de dados...`);
     const result = await importXmlFiles(files);
     await reloadFromDatabase({
-      statusMessage: result.importedNotes ? `${result.importedNotes} XML(s) importado(s) com sucesso.` : "Nenhum XML novo foi encontrado para importação.",
+      statusMessage: result.importedNotes
+        ? `${result.importedNotes} XML(s) importado(s) e salvos no banco com sucesso.`
+        : "Nenhum XML novo foi encontrado para importacao.",
       emptyMessage: "Nenhum XML importado ainda."
     });
-    if (result.invalidFiles.length) showToast(`Alguns arquivos foram ignorados: ${result.invalidFiles.join(", ")}`);
-    else if (result.importedNotes) showToast("Importação concluída com sucesso.");
-    else if (result.skippedNotes) showToast("Os XMLs selecionados já estavam salvos.");
+    if (result.importedNotes && result.skippedNotes) {
+      showToast("warning", `${result.importedNotes} XML(s) foram salvos no banco. Alguns XMLs ja existiam e foram ignorados.`);
+    } else if (result.invalidFiles.length) {
+      showToast("warning", `Alguns arquivos foram ignorados: ${result.invalidFiles.join(", ")}`);
+    } else if (result.importedNotes) {
+      showToast("success", "XMLs importados e salvos no banco com sucesso.");
+    } else if (result.skippedNotes) {
+      setStatus("warning", "Alguns XMLs ja existiam e foram ignorados.");
+      showToast("warning", "Alguns XMLs ja existiam e foram ignorados.");
+    } else {
+      showToast("info", "Nenhum XML novo foi encontrado para importacao.");
+    }
   } catch (error) {
-    setStatus("error", error.userMessage || "Não foi possível concluir a importação.");
-    showToast("Falha ao importar os XMLs.");
+    const message = error.userMessage || "Falha ao enviar XMLs para o banco de dados.";
+    setStatus("error", message);
+    showToast("error", message);
   } finally {
     refs.xmlFiles.value = "";
     setLoading(false);
+    if (!refs.toast.hidden && refs.toast.classList.contains("info")) {
+      hideToast();
+    }
   }
 }
 
 async function handleBulkReason(onlySelected) {
   const noteKey = refs.noteSelect.value;
   const reason = normalizeReason(onlySelected ? refs.applySelected.value : refs.applyAll.value);
-  if (!noteKey || !reason) { showToast("Selecione a nota e o motivo antes de aplicar."); return; }
+  if (!noteKey || !reason) {
+    showToast("warning", "Selecione a nota e o motivo antes de aplicar.");
+    return;
+  }
+
   try {
-    setLoading(true, "Salvando classificação...");
+    setLoading(true, "Salvando classificacao...");
     await updateReasonForNote(noteKey, reason, onlySelected);
-    await reloadFromDatabase({ statusMessage: "Classificação atualizada automaticamente." });
+    await reloadFromDatabase({ statusMessage: "Classificacao atualizada automaticamente." });
     refs.noteSelect.value = noteKey;
     renderClassification(state, refs);
-    showToast("Motivo salvo com sucesso.");
+    showToast("success", "Motivo salvo com sucesso.");
   } catch (error) {
-    setStatus("error", error.userMessage || "Não foi possível atualizar o motivo.");
+    setStatus("error", error.userMessage || "Nao foi possivel atualizar o motivo.");
   } finally {
     setLoading(false);
   }
 }
 
 function bindEvents() {
+  window.addEventListener("app-theme-change", () => {
+    if (state.items.length) refreshUi();
+  });
+
+  refs.pendingOnlyBtn?.addEventListener("click", () => {
+    const active = refs.pendingOnlyBtn.getAttribute("aria-pressed") === "true";
+    refs.pendingOnlyBtn.setAttribute("aria-pressed", String(!active));
+    refreshUi();
+    if (state.items.length) {
+      setStatus("success", !active ? `${state.filtered.length} item(ns) pendente(s) no filtro atual.` : `${state.filtered.length} item(ns) no filtro atual.`);
+    }
+  });
+
   refs.xmlFiles.addEventListener("change", (event) => handleImport([...event.target.files]));
 
   [refs.basis, refs.storeFilter, refs.typeFilter, refs.sectorFilter, refs.reasonFilter, refs.monthFilter].forEach((element) => {
@@ -178,7 +265,13 @@ function bindEvents() {
     });
   });
 
-  [refs.noteStoreFilter, refs.noteMonthFilter].forEach((element) => element.addEventListener("change", () => { buildNoteOptions(state, refs); renderClassification(state, refs); }));
+  [refs.noteStoreFilter, refs.noteMonthFilter].forEach((element) => {
+    element.addEventListener("change", () => {
+      buildNoteOptions(state, refs);
+      renderClassification(state, refs);
+    });
+  });
+
   refs.noteSelect.addEventListener("change", () => renderClassification(state, refs));
   refs.productSearch.addEventListener("input", () => renderItems(state, refs));
   refs.applyAllBtn.addEventListener("click", () => handleBulkReason(false));
@@ -190,13 +283,13 @@ function bindEvents() {
     const note = state.notes.find((entry) => entry.key === noteKey);
     if (!note) return;
     try {
-      setLoading(true, "Atualizando seleção...");
+      setLoading(true, "Atualizando selecao...");
       for (const item of note.items) await updateItemField(item.id, { selected: event.target.checked });
-      await reloadFromDatabase({ statusMessage: "Seleção atualizada automaticamente." });
+      await reloadFromDatabase({ statusMessage: "Selecao atualizada automaticamente." });
       refs.noteSelect.value = noteKey;
       renderClassification(state, refs);
     } catch (error) {
-      setStatus("error", error.userMessage || "Não foi possível atualizar a seleção.");
+      setStatus("error", error.userMessage || "Nao foi possivel atualizar a selecao.");
     } finally {
       setLoading(false);
     }
@@ -213,7 +306,7 @@ function bindEvents() {
         await updateItemField(itemId, { selected: event.target.checked });
       } catch (error) {
         await reloadFromDatabase({ statusMessage: "Dados atualizados automaticamente." });
-        setStatus("error", error.userMessage || "Não foi possível atualizar a seleção do item.");
+        setStatus("error", error.userMessage || "Nao foi possivel atualizar a selecao do item.");
       }
       return;
     }
@@ -226,7 +319,7 @@ function bindEvents() {
         setStatus("success", "Motivo salvo automaticamente.");
       } catch (error) {
         await reloadFromDatabase({ statusMessage: "Dados atualizados automaticamente." });
-        setStatus("error", error.userMessage || "Não foi possível salvar o motivo.");
+        setStatus("error", error.userMessage || "Nao foi possivel salvar o motivo.");
       }
     }
   });
@@ -246,9 +339,9 @@ function bindEvents() {
         await reloadFromDatabase({ statusMessage: "Setor atualizado automaticamente." });
         refs.noteSelect.value = noteKey;
         renderClassification(state, refs);
-        showToast("Setor salvo com sucesso.");
+        showToast("success", "Setor salvo com sucesso.");
       } catch (error) {
-        setStatus("error", error.userMessage || "Não foi possível atualizar o setor.");
+        setStatus("error", error.userMessage || "Nao foi possivel atualizar o setor.");
       } finally {
         setLoading(false);
       }
@@ -262,28 +355,41 @@ function bindEvents() {
         await deleteNote(noteKey);
         refs.noteSelect.value = "";
         await reloadFromDatabase({ statusMessage: "Nota removida com sucesso.", emptyMessage: "Nenhum XML importado ainda." });
-        showToast("Nota excluída com sucesso.");
+        showToast("success", "Nota excluida com sucesso.");
       } catch (error) {
-        setStatus("error", error.userMessage || "Não foi possível excluir a nota.");
+        setStatus("error", error.userMessage || "Nao foi possivel excluir a nota.");
       } finally {
         setLoading(false);
       }
     }
   });
 
-  refs.jsonBtn.addEventListener("click", () => { try { exportJson(state); } catch (error) { showToast(error.message); } });
-  refs.csvBtn.addEventListener("click", () => { try { exportCsv(state); } catch (error) { showToast(error.message); } });
-  refs.reportBtn.addEventListener("click", () => { try { openPrintReport(state, refs); } catch (error) { showToast(error.message); } });
+  refs.csvBtn.addEventListener("click", () => {
+    try {
+      exportCsv(state);
+    } catch (error) {
+      showToast("warning", error.message);
+    }
+  });
+
+  refs.reportBtn.addEventListener("click", () => {
+    try {
+      openPrintReport(state, refs);
+    } catch (error) {
+      showToast("warning", error.message);
+    }
+  });
 
   refs.clearBtn.addEventListener("click", async () => {
-    if (!window.confirm("Deseja limpar todos os dados já importados do banco?")) return;
+    if (!window.confirm("Deseja limpar todos os dados ja importados do banco?")) return;
     try {
       setLoading(true, "Limpando base de dados...");
       await clearDatabase();
+      refs.pendingOnlyBtn?.setAttribute("aria-pressed", "false");
       await reloadFromDatabase({ statusMessage: "Base limpa com sucesso.", emptyMessage: "Nenhum XML importado ainda." });
-      showToast("Base limpa com sucesso.");
+      showToast("success", "Base limpa com sucesso.");
     } catch (error) {
-      setStatus("error", error.userMessage || "Não foi possível limpar a base.");
+      setStatus("error", error.userMessage || "Nao foi possivel limpar a base.");
     } finally {
       setLoading(false);
     }
@@ -293,12 +399,18 @@ function bindEvents() {
 }
 
 async function init() {
+  state.uiCleanup = initUi(refs);
   bindEvents();
-  await reloadFromDatabase({ loadingMessage: "Carregando dados do Supabase...", statusMessage: "Dados carregados automaticamente.", emptyMessage: "Nenhum XML importado ainda." });
+  await reloadFromDatabase({
+    loadingMessage: "Carregando dados oficiais do Supabase...",
+    statusMessage: "Dados oficiais carregados automaticamente do Supabase.",
+    emptyMessage: "Nenhum XML importado ainda."
+  });
   try {
     state.realtimeCleanup = await subscribeRealtime(() => scheduleRealtimeReload());
   } catch (error) {
     console.error(error);
+    setStatus("warning", error.userMessage || "Realtime indisponivel. O Supabase continua sendo a fonte oficial, mas sem atualizacao automatica.");
   }
 }
 

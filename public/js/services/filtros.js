@@ -21,7 +21,9 @@ export function buildNoteOptions(state, refs) {
 
   const scopedNotes = state.notes.filter((note) => {
     const sample = note.items[0];
-    const monthValue = basis === "competence" ? sample?.competenceMonth : sample?.emissionMonth;
+    const monthValue = basis === "competence"
+      ? (sample?.competenceMonth || note.competenceMonth)
+      : (sample?.emissionMonth || note.emissionMonth);
     if (noteStore !== "TODAS" && note.store !== noteStore) return false;
     if (noteMonth !== "TODOS" && monthValue !== noteMonth) return false;
     return true;
@@ -36,11 +38,17 @@ export function buildNoteOptions(state, refs) {
       const typeNotes = storeNotes.filter((note) => note.type === type);
       if (!typeNotes.length) return;
       html.push(`<optgroup label="${store} - ${type}">`);
-      typeNotes.sort((a, b) => String(a.invoice).localeCompare(String(b.invoice), "pt-BR", { numeric: true })).forEach((note) => {
-        const sample = note.items[0];
-        const monthValue = basis === "competence" ? sample?.competenceMonth : sample?.emissionMonth;
-        html.push(`<option value="${note.key}">NF ${note.invoice} · ${monthValue || "Sem data"} · ${note.sector} · ${note.displayType || note.type}</option>`);
-      });
+      typeNotes
+        .sort((a, b) => String(a.invoice).localeCompare(String(b.invoice), "pt-BR", { numeric: true }))
+        .forEach((note) => {
+          const sample = note.items[0];
+          const monthValue = basis === "competence"
+            ? (sample?.competenceMonth || note.competenceMonth)
+            : (sample?.emissionMonth || note.emissionMonth);
+          const pendingCount = note.items.filter((item) => !item.reason).length;
+          const pendingLabel = pendingCount ? ` - ${pendingCount} pend.` : "";
+          html.push(`<option value="${note.key}">NF ${note.invoice} · ${monthValue || "Sem data"} · ${note.sector} · ${note.displayType || note.type}${pendingLabel}</option>`);
+        });
       html.push("</optgroup>");
     });
   });
@@ -77,6 +85,7 @@ export function applyFilters(state, refs) {
   const reason = refs.reasonFilter.value;
   const month = refs.monthFilter.value;
   const basis = refs.basis.value;
+  const pendingOnly = refs.pendingOnlyBtn?.getAttribute("aria-pressed") === "true";
 
   return state.items.filter((item) => {
     const monthValue = basis === "competence" ? item.competenceMonth : item.emissionMonth;
@@ -86,6 +95,7 @@ export function applyFilters(state, refs) {
     if (reason === "SEM" && item.reason) return false;
     if (reason !== "TODOS" && reason !== "SEM" && item.reason !== reason) return false;
     if (month !== "TODOS" && monthValue !== month) return false;
+    if (pendingOnly && item.reason) return false;
     return true;
   });
 }
@@ -93,11 +103,17 @@ export function applyFilters(state, refs) {
 export function currentFilterSummary(refs) {
   const entries = [["Loja", refs.storeFilter], ["Tipo", refs.typeFilter], ["Setor", refs.sectorFilter], ["Motivo", refs.reasonFilter], ["Mês", refs.monthFilter], ["Base", refs.basis]];
 
-  return entries.map(([label, element]) => {
+  const summary = entries.map(([label, element]) => {
     let value = element.value;
-    if (element === refs.basis) value = value === "competence" ? "Competência" : "Emissão";
+    if (element === refs.basis) value = value === "competence" ? "Competencia" : "Emissao";
     if (value === "TODAS" || value === "TODOS") return null;
     if (value === "SEM") value = "Sem motivo";
     return { label, value };
   }).filter(Boolean);
+
+  if (refs.pendingOnlyBtn?.getAttribute("aria-pressed") === "true") {
+    summary.push({ label: "Pendencia", value: "Somente pendentes" });
+  }
+
+  return summary;
 }

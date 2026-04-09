@@ -133,8 +133,29 @@ export function sortLabels(values) {
   return [...values].sort((a, b) => String(a).localeCompare(String(b), "pt-BR", { numeric: true }));
 }
 
-export function groupItemsByNote(items) {
+export function groupItemsByNote(items, noteRows = []) {
   const noteMap = new Map();
+
+  noteRows.forEach((note) => {
+    if (!note?.noteKey) return;
+    noteMap.set(note.noteKey, {
+      key: note.noteKey,
+      accessKey: note.accessKey || "",
+      invoice: note.invoice || "-",
+      store: note.store || "Loja nao identificada",
+      date: note.date || "",
+      emissionMonth: note.emissionMonth || monthKey(note.date),
+      competenceMonth: note.competenceMonth || competenceKey(note.date),
+      type: note.type || "Outros",
+      displayType: note.displayType || detailType(note.type, note.sector),
+      sector: note.sector || "Nao classificado",
+      operation: note.operation || "",
+      totalValue: 0,
+      itemCount: 0,
+      items: []
+    });
+  });
+
   items.forEach((item) => {
     if (!noteMap.has(item.noteKey)) {
       noteMap.set(item.noteKey, {
@@ -143,14 +164,30 @@ export function groupItemsByNote(items) {
         invoice: item.invoice,
         store: item.store,
         date: item.date,
+        emissionMonth: item.emissionMonth,
+        competenceMonth: item.competenceMonth,
         type: item.type,
         displayType: item.displayType,
         sector: item.sector,
         operation: item.operation,
+        totalValue: Number(item.value || 0),
+        itemCount: 0,
         items: []
       });
     }
-    noteMap.get(item.noteKey).items.push(item);
+    const note = noteMap.get(item.noteKey);
+    note.items.push(item);
+    note.totalValue += Number(item.value || 0);
+    note.itemCount += 1;
+    if (!note.invoice && item.invoice) note.invoice = item.invoice;
+    if (!note.store && item.store) note.store = item.store;
+    if (!note.date && item.date) note.date = item.date;
+    if (!note.emissionMonth && item.emissionMonth) note.emissionMonth = item.emissionMonth;
+    if (!note.competenceMonth && item.competenceMonth) note.competenceMonth = item.competenceMonth;
+    if (!note.type && item.type) note.type = item.type;
+    if (!note.displayType && item.displayType) note.displayType = item.displayType;
+    if (!note.sector && item.sector) note.sector = item.sector;
+    if (!note.operation && item.operation) note.operation = item.operation;
   });
   return [...noteMap.values()].sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
 }

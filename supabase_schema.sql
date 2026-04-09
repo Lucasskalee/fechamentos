@@ -44,9 +44,12 @@ create table if not exists public.loss_items (
   updated_at timestamptz not null default timezone('utc', now())
 );
 
+create unique index if not exists idx_loss_notes_access_key on public.loss_notes(access_key) where access_key is not null;
 create index if not exists idx_loss_notes_store on public.loss_notes(store);
 create index if not exists idx_loss_notes_month on public.loss_notes(competence_month, emission_month);
 create index if not exists idx_loss_items_note_key on public.loss_items(note_key);
+create index if not exists idx_loss_items_access_key on public.loss_items(access_key);
+create unique index if not exists idx_loss_items_note_item on public.loss_items(note_key, item_index);
 create index if not exists idx_loss_items_filters on public.loss_items(store, type, sector, reason);
 
 create or replace function public.set_updated_at()
