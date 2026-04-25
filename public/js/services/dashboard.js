@@ -108,6 +108,58 @@ function chartLabelsFromMap(map) {
   return Object.keys(map).sort((a, b) => String(a).localeCompare(String(b), "pt-BR"));
 }
 
+export function normalizeSector(value) {
+  const normalized = String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim()
+    .toLowerCase();
+
+  if (!normalized || normalized === "nao classificado" || normalized === "sem setor") return "Sem setor";
+  if (normalized === "acougue") return "Acougue";
+  if (normalized === "producao padaria") return "Producao Padaria";
+  if (normalized === "frios e congelados") return "Frios e Congelados";
+  if (normalized === "flv") return "FLV";
+  if (normalized === "loja deposito" || normalized === "loja/deposito") return "Loja/Deposito";
+  if (normalized === "frente de caixa") return "Frente de Caixa";
+  return normalized.split(" ").map((part) => part ? part[0].toUpperCase() + part.slice(1) : part).join(" ");
+}
+
+export function buildSectorSummary(items) {
+  const sectorMap = new Map();
+  const totalValue = items.reduce((sum, item) => sum + Number(item.value || 0), 0);
+
+  items.forEach((item) => {
+    const sector = normalizeSector(item.sector);
+    if (!sectorMap.has(sector)) {
+      sectorMap.set(sector, {
+        sector,
+        totalValue: 0,
+        itemsCount: 0,
+        notes: new Set(),
+        pendingItems: 0
+      });
+    }
+
+    const current = sectorMap.get(sector);
+    current.totalValue += Number(item.value || 0);
+    current.itemsCount += 1;
+    current.notes.add(item.noteKey);
+    if (!item.reason) current.pendingItems += 1;
+  });
+
+  return [...sectorMap.values()]
+    .map((entry) => ({
+      sector: entry.sector,
+      totalValue: entry.totalValue,
+      itemsCount: entry.itemsCount,
+      notesCount: entry.notes.size,
+      pendingItems: entry.pendingItems,
+      percentage: totalValue ? (entry.totalValue / totalValue) * 100 : 0
+    }))
+    .sort((a, b) => b.totalValue - a.totalValue);
+}
+
 function getPendingSummary(items) {
   const pendingItems = items.filter((item) => !item.reason);
   const classifiedCount = items.length - pendingItems.length;
@@ -164,11 +216,165 @@ function buildRowReasonCell(reason) {
   return `<div class="cell-stack">${buildReasonBadge(reason)}<span>${escapeHtml(reason || "Sem motivo")}</span></div>`;
 }
 
+function buildNoteDetails(items, basis) {
+  const noteMap = {};
+  items.forEach((item) => {
+    if (!noteMap[item.noteKey]) {
+      noteMap[item.noteKey] = {
+        noteKey: item.noteKey,
+        invoice: item.invoice || "-",
+        store: item.store || "-",
+        sector: item.sector || "-",
+        month: basis === "competence" ? item.competenceMonth : item.emissionMonth,
+        date: item.date || "",
+        total: 0,
+        loss: 0,
+        usage: 0,
+        items: 0,
+        pending: 0
+      };
+    }
+    noteMap[item.noteKey].total += Number(item.value || 0);
+    noteMap[item.noteKey].items += 1;
+    if (item.type === "Perdas") noteMap[item.noteKey].loss += Number(item.value || 0);
+    if (item.type === "Uso/Consumo") noteMap[item.noteKey].usage += Number(item.value || 0);
+    if (!item.reason) noteMap[item.noteKey].pending += 1;
+  });
+
+  return Object.values(noteMap).sort((a, b) =>
+    (b.pending - a.pending)
+    || String(b.date || "").localeCompare(String(a.date || ""))
+    || String(a.invoice || "").localeCompare(String(b.invoice || ""), "pt-BR", { numeric: true })
+  );
+}
+
+function renderStoreSummaryBySelectedSector(state, dashboardItems, refs) {
+  const selectedSector = refs.sectorFilter.value;
+  const allStores = [...new Set(state.items.map((item) => item.store).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR", { numeric: true }));
+
+  return allStores.map((storeName) => {
+    const storeItems = dashboardItems.filter((item) => item.store === storeName);
+    const losses = storeItems
+      .filter((item) => item.type === "Perdas")
+      .reduce((sum, item) => sum + Number(item.value || 0), 0);
+    const usage = storeItems
+      .filter((item) => item.type === "Uso/Consumo")
+      .reduce((sum, item) => sum + Number(item.value || 0), 0);
+    const total = storeItems.reduce((sum, item) => sum + Number(item.value || 0), 0);
+
+    return `
+      <div class="mini-item">
+        <div class="cell-stack">
+          <strong>${escapeHtml(storeName)}</strong>
+          <span>Setor selecionado: ${escapeHtml(selectedSector)}</span>
+        </div>
+        <div class="cell-stack">
+          <span>Perdas ${brl(losses)}</span>
+          <span>Uso/Consumo ${brl(usage)}</span>
+          <strong>Total ${brl(total)}</strong>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderSectorChartSummary(sectorsSummary, refs) {
+  if (!refs.sectorChartSummary) return;
+  const topSector = sectorsSummary[0];
+  if (!topSector) {
+    refs.sectorChartSummary.innerHTML = renderEmpty("Nenhum dado por setor para o filtro atual.");
+    return;
+  }
+
+  refs.sectorChartSummary.innerHTML = `
+    <div class="summary-grid">
+      <div class="summary-card">
+        <div class="label">Setor lider</div>
+        <strong>${escapeHtml(topSector.sector)}</strong>
+      </div>
+      <div class="summary-card">
+        <div class="label">Valor</div>
+        <strong>${brl(topSector.totalValue)}</strong>
+      </div>
+      <div class="summary-card">
+        <div class="label">Participacao</div>
+        <strong>${topSector.percentage.toFixed(1).replace(".", ",")}%</strong>
+      </div>
+      <div class="summary-card">
+        <div class="label">Pendentes</div>
+        <strong>${topSector.pendingItems}</strong>
+      </div>
+    </div>
+    <div class="mini">
+      ${sectorsSummary.slice(0, 6).map((entry) => `
+        <div class="mini-item">
+          <strong>${escapeHtml(entry.sector)}</strong>
+          <span>${brl(entry.totalValue)} · ${entry.notesCount} nota(s) · ${entry.itemsCount} item(ns)</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderSectorChart(sectorsSummary, refs, chartTheme) {
+  if (!refs.sectorChart) return null;
+  if (refs.sectorChartEmpty) refs.sectorChartEmpty.hidden = sectorsSummary.length > 0;
+  if (!sectorsSummary.length) return null;
+
+  return new window.Chart(refs.sectorChart, {
+    type: "bar",
+    data: {
+      labels: sectorsSummary.map((entry) => entry.sector),
+      datasets: [{
+        label: "Valor por setor",
+        data: sectorsSummary.map((entry) => entry.totalValue),
+        backgroundColor: sectorsSummary.map((_, index) => index === 0 ? getCssVar("--accent", "#0f5bd4") : getCssVar("--accent-2", "#18a0b7")),
+        borderRadius: 10,
+        barThickness: 18
+      }]
+    },
+    options: {
+      indexAxis: "y",
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title(context) {
+              return context[0]?.label || "";
+            },
+            label(context) {
+              const current = sectorsSummary[context.dataIndex];
+              if (!current) return "";
+              return [
+                `Valor: ${brl(current.totalValue)}`,
+                `Itens: ${current.itemsCount}`,
+                `Notas: ${current.notesCount}`,
+                `Pendentes: ${current.pendingItems}`,
+                `Participacao: ${current.percentage.toFixed(1).replace(".", ",")}%`
+              ];
+            }
+          }
+        }
+      },
+      scales: {
+        x: chartTheme.scales.y,
+        y: chartTheme.scales.x
+      }
+    }
+  });
+}
+
 export function renderDashboard(state, refs) {
   const dashboardItems = state.filtered.filter((item) => item.type !== "Outros");
   const basis = refs.basis.value;
   const pendingSummary = getPendingSummary(dashboardItems);
+  const sectorsSummary = buildSectorSummary(dashboardItems);
   const notesCount = new Set(dashboardItems.map((item) => item.noteKey)).size;
+  const totalBankNotes = state.notes.length;
+  const totalFilteredNotes = new Set(state.filtered.map((item) => item.noteKey)).size;
+  const notesWithoutItems = state.notes.filter((note) => !note.items?.length).length;
   const total = dashboardItems.reduce((sum, item) => sum + Number(item.value || 0), 0);
   const loss = dashboardItems.filter((item) => item.type === "Perdas").reduce((sum, item) => sum + Number(item.value || 0), 0);
   const usage = dashboardItems.filter((item) => item.type === "Uso/Consumo").reduce((sum, item) => sum + Number(item.value || 0), 0);
@@ -196,6 +402,24 @@ export function renderDashboard(state, refs) {
   refs.pendingNotesCount.textContent = String(pendingSummary.notesWithPending);
   refs.pendingCompletion.textContent = `${pendingSummary.completionRate}%`;
 
+  console.log("[Dashboard] Total notas banco:", totalBankNotes);
+  console.log("[Dashboard] Total notas carregadas:", state.notes.length);
+  console.log("[Dashboard] Total notas filtradas:", totalFilteredNotes);
+  console.log("[Dashboard] Total notas exibidas:", notesCount);
+  console.log("[Dashboard] Filtros ativos:", {
+    loja: refs.storeFilter.value,
+    tipo: refs.typeFilter.value,
+    setor: refs.sectorFilter.value,
+    motivo: refs.reasonFilter.value,
+    mes: refs.monthFilter.value,
+    base: refs.basis.value,
+    pendentes: refs.pendingOnlyBtn?.getAttribute("aria-pressed") === "true"
+  });
+  console.log("[Resumo por setor]", sectorsSummary);
+  if (notesWithoutItems) {
+    console.warn("[Dashboard] Notas sem itens associados:", notesWithoutItems);
+  }
+
   if (pendingSummary.pendingCount > 0) {
     refs.pendingExecutiveTitle.textContent = "Pendencias exigem acao operacional";
     refs.pendingExecutiveText.textContent = "Os filtros atuais ainda possuem itens sem motivo. Priorize as notas e setores com maior pendencia.";
@@ -217,41 +441,30 @@ export function renderDashboard(state, refs) {
     refs.pendingFocusMeta.textContent = "Nao ha itens sem motivo nas lojas, setores e notas filtrados.";
   }
 
-  refs.storesBody.innerHTML = Object.entries(stores).sort((a, b) => (b[1].pending - a[1].pending) || (b[1].value - a[1].value)).map(([storeName, info]) => {
-    const storeItems = dashboardItems.filter((item) => item.store === storeName);
-    const monthGroups = {};
-    storeItems.forEach((item) => {
-      const monthValue = basis === "competence" ? item.competenceMonth : item.emissionMonth;
-      if (!monthGroups[monthValue]) monthGroups[monthValue] = { total: 0, loss: 0, usage: 0, notes: new Set(), pending: 0 };
-      monthGroups[monthValue].total += Number(item.value || 0);
-      if (item.type === "Perdas") monthGroups[monthValue].loss += Number(item.value || 0);
-      if (item.type === "Uso/Consumo") monthGroups[monthValue].usage += Number(item.value || 0);
-      monthGroups[monthValue].notes.add(item.noteKey);
-      if (!item.reason) monthGroups[monthValue].pending += 1;
-    });
-    const monthRows = chartLabelsFromMap(monthGroups).map((month) => {
-      const monthInfo = monthGroups[month];
-      return `<div class="store-month-row"><div><strong>${escapeHtml(month)}</strong><span>${monthInfo.notes.size} nota(s)</span></div><strong>${brl(monthInfo.total)}</strong><strong>${brl(monthInfo.loss)}</strong><strong>${brl(monthInfo.usage)}</strong><div class="cell-stack">${monthInfo.pending ? '<span class="status-badge warning">Pendentes</span>' : '<span class="status-badge success">Ok</span>'}<span>${monthInfo.pending} item(ns)</span></div></div>`;
-    }).join("");
-    return `<details class="sector-accordion"><summary><div><strong>${escapeHtml(storeName)}</strong><div class="sector-meta">${new Set(storeItems.map((item) => item.noteKey)).size} nota(s)</div></div><div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap"><span>${brl(info.value)}</span><span class="sector-meta">Perdas ${brl(storeItems.filter((item) => item.type === "Perdas").reduce((sum, item) => sum + Number(item.value || 0), 0))}</span><span class="sector-meta">Uso ${brl(storeItems.filter((item) => item.type === "Uso/Consumo").reduce((sum, item) => sum + Number(item.value || 0), 0))}</span>${info.pending ? `<span class="status-badge warning">${info.pending} pendente(s)</span>` : '<span class="status-badge success">Tudo classificado</span>'}</div></summary><div class="store-month-grid">${monthRows}</div></details>`;
-  }).join("") || renderEmpty("Nenhum XML importado ainda.");
+  refs.storesBody.innerHTML = refs.sectorFilter.value !== "TODOS"
+    ? (renderStoreSummaryBySelectedSector(state, dashboardItems, refs) || renderEmpty("Nenhum XML importado ainda."))
+    : Object.entries(stores).sort((a, b) => (b[1].pending - a[1].pending) || (b[1].value - a[1].value)).map(([storeName, info]) => {
+      const storeItems = dashboardItems.filter((item) => item.store === storeName);
+      const noteRows = buildNoteDetails(storeItems, basis).map((note) => {
+        return `<div class="store-month-row"><div><strong>NF ${escapeHtml(note.invoice)}</strong><span>${escapeHtml(note.month || "Sem data")}</span></div><strong>${brl(note.total)}</strong><strong>${brl(note.loss)}</strong><strong>${brl(note.usage)}</strong><div class="cell-stack">${note.pending ? '<span class="status-badge warning">Pendentes</span>' : '<span class="status-badge success">Ok</span>'}<span>${note.pending} item(ns)</span></div></div>`;
+      }).join("");
+      return `<details class="sector-accordion"><summary><div><strong>${escapeHtml(storeName)}</strong><div class="sector-meta">${new Set(storeItems.map((item) => item.noteKey)).size} nota(s)</div></div><div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap"><span>${brl(info.value)}</span><span class="sector-meta">Perdas ${brl(storeItems.filter((item) => item.type === "Perdas").reduce((sum, item) => sum + Number(item.value || 0), 0))}</span><span class="sector-meta">Uso ${brl(storeItems.filter((item) => item.type === "Uso/Consumo").reduce((sum, item) => sum + Number(item.value || 0), 0))}</span>${info.pending ? `<span class="status-badge warning">${info.pending} pendente(s)</span>` : '<span class="status-badge success">Tudo classificado</span>'}</div></summary><div class="store-month-grid">${noteRows}</div></details>`;
+    }).join("") || renderEmpty("Nenhum XML importado ainda.");
 
   const sectors = {};
   dashboardItems.forEach((item) => {
-    if (!sectors[item.sector]) sectors[item.sector] = { total: 0, reasons: {}, pending: 0, notes: new Set() };
+    if (!sectors[item.sector]) sectors[item.sector] = { total: 0, pending: 0, notes: new Set(), items: [] };
     sectors[item.sector].total += Number(item.value || 0);
     sectors[item.sector].notes.add(item.noteKey);
+    sectors[item.sector].items.push(item);
     if (!item.reason) sectors[item.sector].pending += 1;
-    const reason = item.reason || "Sem motivo";
-    if (!sectors[item.sector].reasons[reason]) sectors[item.sector].reasons[reason] = { value: 0, items: 0, notes: new Set() };
-    sectors[item.sector].reasons[reason].value += Number(item.value || 0);
-    sectors[item.sector].reasons[reason].items += 1;
-    sectors[item.sector].reasons[reason].notes.add(item.noteKey);
   });
 
   refs.sectorBox.innerHTML = Object.entries(sectors).sort((a, b) => (b[1].pending - a[1].pending) || (b[1].total - a[1].total)).map(([sectorName, data]) => {
-    const reasons = Object.entries(data.reasons).sort((a, b) => ((b[0] === "Sem motivo") - (a[0] === "Sem motivo")) || (b[1].value - a[1].value));
-    return `<details class="sector-accordion"><summary><div><strong>${escapeHtml(sectorName)}</strong><div class="sector-meta">${data.notes.size} nota(s) no setor</div></div><div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap"><span>${brl(data.total)}</span>${data.pending ? `<span class="status-badge warning">${data.pending} pendente(s)</span>` : '<span class="status-badge success">Resolvido</span>'}</div></summary><div class="sector-details">${reasons.map(([reason, info]) => `<div class="sector-reason"><div><strong>${escapeHtml(reason)}</strong><span>${info.items} item(ns) - ${info.notes.size} nota(s)</span></div><div class="cell-stack">${reason === "Sem motivo" ? '<span class="status-badge warning">Prioridade</span>' : ""}<strong>${brl(info.value)}</strong></div></div>`).join("")}</div></details>`;
+    const notesMarkup = buildNoteDetails(data.items, basis).map((note) => {
+      return `<div class="sector-reason"><div><strong>NF ${escapeHtml(note.invoice)}</strong><span>${escapeHtml(note.store)} - ${escapeHtml(note.month || "Sem data")}</span></div><div class="cell-stack">${note.pending ? `<span class="status-badge warning">${note.pending} pendente(s)</span>` : '<span class="status-badge success">Ok</span>'}<strong>${brl(note.total)}</strong></div></div>`;
+    }).join("");
+    return `<details class="sector-accordion"><summary><div><strong>${escapeHtml(sectorName)}</strong><div class="sector-meta">${data.notes.size} nota(s) no setor</div></div><div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap"><span>${brl(data.total)}</span>${data.pending ? `<span class="status-badge warning">${data.pending} pendente(s)</span>` : '<span class="status-badge success">Resolvido</span>'}</div></summary><div class="sector-details">${notesMarkup}</div></details>`;
   }).join("") || renderEmpty("Nenhum XML importado ainda.");
 
   const productMap = {};
@@ -299,10 +512,11 @@ export function renderDashboard(state, refs) {
     return `<details class="sector-accordion"><summary><div style="display:flex;align-items:center;gap:12px"><div class="rank-pos">${index + 1}</div><div><strong>${escapeHtml(product)}</strong><div class="sector-meta">${data.notes.size} nota(s) - ${data.items} lancamento(s)</div></div></div><div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap"><span>${brl(data.value)}</span><span class="sector-meta">Qtd ${num(data.quantity)}</span><span class="sector-meta">Motivo ${escapeHtml(topReason ? topReason[0] : "-")}</span>${data.pending ? `<span class="status-badge warning">${data.pending} pendente(s)</span>` : '<span class="status-badge success">Tudo classificado</span>'}</div></summary><div class="sector-details">${storesMarkup}</div></details>`;
   }).join("") || renderEmpty("Nenhum produto no filtro atual.");
 
-  renderCharts(state, refs);
+  renderSectorChartSummary(sectorsSummary, refs);
+  renderCharts(state, refs, sectorsSummary);
 }
 
-export function renderCharts(state, refs) {
+export function renderCharts(state, refs, sectorsSummary = buildSectorSummary(state.filtered.filter((item) => item.type !== "Outros"))) {
   const chartItems = state.filtered.filter((item) => item.type !== "Outros");
   const basis = refs.basis.value;
   const focusedSector = refs.sectorFilter.value !== "TODOS";
@@ -322,7 +536,14 @@ export function renderCharts(state, refs) {
   } : null;
   if (state.monthChart) state.monthChart.destroy();
   if (state.typeChart) state.typeChart.destroy();
-  if (!chartItems.length) { state.monthChart = null; state.typeChart = null; return; }
+  if (state.sectorChart) state.sectorChart.destroy();
+  if (!chartItems.length) {
+    state.monthChart = null;
+    state.typeChart = null;
+    state.sectorChart = null;
+    if (refs.sectorChartEmpty) refs.sectorChartEmpty.hidden = false;
+    return;
+  }
 
   if (focusedSector) {
     const monthMap = {}, reasonMap = {};
@@ -339,6 +560,7 @@ export function renderCharts(state, refs) {
     const reasonDetails = buildSliceDetails(chartItems, (item) => item.reason || "Sem motivo");
     state.monthChart = new window.Chart(refs.monthChart, { type: "bar", data: { labels, datasets: reasons.map((reason) => ({ label: reason, data: labels.map((label) => monthMap[label][reason] || 0), backgroundColor: REASON_COLORS[reason] || textSoft, borderRadius: 8 })) }, options: { responsive: true, maintainAspectRatio: false, interaction: { mode: "index", intersect: false }, plugins: chartTheme.plugins, scales: chartTheme.scales } });
     state.typeChart = new window.Chart(refs.typeChart, { type: "doughnut", data: { labels: reasons, datasets: [{ data: reasons.map((reason) => reasonMap[reason] || 0), backgroundColor: reasons.map((reason) => REASON_COLORS[reason] || textSoft), borderColor: surface, borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { ...chartTheme.plugins, ...buildDoughnutTooltipOptions(reasonDetails, totalValue, singleNoteDetails) } } });
+    state.sectorChart = renderSectorChart(sectorsSummary, refs, chartTheme);
     return;
   }
 
@@ -353,6 +575,7 @@ export function renderCharts(state, refs) {
   const typeDetails = buildSliceDetails(chartItems, (item) => item.type);
   state.monthChart = new window.Chart(refs.monthChart, { type: "bar", data: { labels, datasets: [{ label: "Perdas", data: labels.map((label) => monthMap[label].Perdas || 0), backgroundColor: textStrong, borderRadius: 8 }, { label: "Uso/Consumo", data: labels.map((label) => monthMap[label]["Uso/Consumo"] || 0), backgroundColor: accent, borderRadius: 8 }, { label: "Saida entre lojas", data: labels.map((label) => monthMap[label]["SaÃ­da entre lojas"] || 0), backgroundColor: accentAlt, borderRadius: 8 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: chartTheme.plugins, scales: chartTheme.scales } });
   state.typeChart = new window.Chart(refs.typeChart, { type: "doughnut", data: { labels: Object.keys(typeMap), datasets: [{ data: Object.values(typeMap), backgroundColor: [textStrong, accent, accentAlt], borderColor: surface, borderWidth: 2 }] }, options: { responsive: true, maintainAspectRatio: false, plugins: { ...chartTheme.plugins, ...buildDoughnutTooltipOptions(typeDetails, totalValue, singleNoteDetails) } } });
+  state.sectorChart = renderSectorChart(sectorsSummary, refs, chartTheme);
 }
 
 export function renderItems(state, refs) {

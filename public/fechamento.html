@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fechamento Mensal por Setor | Razarth</title>
+  <meta name="description" content="Auditoria mensal por setor com drill-down em notas e produtos, integrada ao Supabase.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./fechamento.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <div class="app-shell fechamento-shell">
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <div class="brand">
+          <div class="brand-logo" aria-hidden="true">R</div>
+          <div class="brand-copy">
+            <span class="brand-kicker">Razarth Control</span>
+            <h1>Fechamento Mensal por Setor</h1>
+            <p>Painel operacional de conferencia mensal com leitura rapida, auditoria manual e drill-down em notas e produtos.</p>
+          </div>
+        </div>
+
+        <div class="sidebar-panel sidebar-highlight">
+          <span class="sidebar-label">Fluxo de auditoria</span>
+          <strong>Conferencia clara e rastreavel</strong>
+          <p>Analise a grade mensal, abra notas por setor e salve divergencias sem perder o contexto do periodo.</p>
+        </div>
+      </div>
+
+      <nav class="side-nav" aria-label="Navegacao do fechamento">
+        <a class="side-link is-active" href="./fechamento.html">
+          <span>Fechamento</span>
+          <small>Mensal por setor</small>
+        </a>
+        <a class="side-link" href="./index.html">
+          <span>Dashboard</span>
+          <small>Voltar ao painel</small>
+        </a>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="sidebar-panel">
+          <span class="sidebar-label">Sincronizacao</span>
+          <strong id="connectionBadge">Conectando ao Supabase</strong>
+          <p id="lastSyncLabel">A leitura da grade, das notas e dos itens acontece sob demanda.</p>
+        </div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="wrap">
+        <header class="topbar fechamento-topbar">
+          <div class="topbar-main">
+            <div class="title-block">
+              <span class="eyebrow">Auditoria premium de fechamentos</span>
+              <h2>Fechamento Mensal por Setor</h2>
+              <p>Consulte a grade mensal, abra notas por celula, confira produtos e registre observacoes operacionais com agilidade.</p>
+            </div>
+
+            <div class="topbar-meta">
+              <div class="meta-card">
+                <span class="meta-label">Ano</span>
+                <strong id="metaYear">--</strong>
+                <small>Recorte da auditoria</small>
+              </div>
+              <div class="meta-card meta-card-time">
+                <span class="meta-label">Atualizacao</span>
+                <strong id="currentTime">--:--:--</strong>
+                <small>Horario local</small>
+              </div>
+            </div>
+          </div>
+        </header>
+
+        <section class="panel hero-panel fechamento-filters-panel">
+          <div class="panel-head">
+            <div>
+              <span class="panel-tag">Filtros</span>
+              <h3>Recorte operacional</h3>
+              <p class="muted-note">Filtre por loja, ano, tipo e status antes de abrir a grade ou iniciar a auditoria manual.</p>
+            </div>
+          </div>
+
+          <div class="filters fechamento-filters">
+            <select id="storeFilter"><option value="TODAS">Todas as lojas</option></select>
+            <select id="yearFilter"><option value="2026">2026</option></select>
+            <select id="typeFilter"><option value="TODOS">Todos os tipos</option></select>
+            <select id="statusFilter"><option value="TODOS">Todos os status</option></select>
+          </div>
+
+          <div class="hero-filter-actions">
+            <button id="refreshBtn" type="button">Atualizar grade</button>
+            <button id="clearBtn" type="button">Limpar filtros</button>
+          </div>
+
+          <div class="status-shell">
+            <div id="statusBanner" class="status info">Carregando fechamento mensal...</div>
+          </div>
+        </section>
+
+        <section class="cards fechamento-kpis" id="summaryCards"></section>
+
+        <section class="panel fechamento-grid-panel">
+          <div id="gridState"></div>
+          <div class="fechamento-grid-shell">
+            <div id="gridTable" class="fechamento-grid-table" role="table" aria-label="Grade mensal por setor"></div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="drawerBackdrop" class="fechamento-drawer-backdrop" hidden></div>
+  <aside id="drawer" class="fechamento-drawer" hidden aria-labelledby="drawerTitle">
+    <div class="fechamento-drawer-head">
+      <div>
+        <span class="panel-tag">Drill-down</span>
+        <h3 id="drawerTitle">Detalhamento da celula</h3>
+        <div id="drawerMeta" class="fechamento-drawer-meta"></div>
+      </div>
+      <button id="drawerClose" type="button">Fechar</button>
+    </div>
+    <div id="drawerBody" class="fechamento-drawer-body"></div>
+  </aside>
+
+  <div id="pageLoading" class="loading-overlay" hidden>
+    <div class="loading-card">
+      <div class="spinner" aria-hidden="true"></div>
+      <strong>Processando fechamento</strong>
+      <span id="loadingText">Aguarde enquanto a grade mensal e sincronizada.</span>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module" src="./js/fechamento.js"></script>
+</body>
+</html>

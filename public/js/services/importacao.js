@@ -1,13 +1,33 @@
 import { getSupabaseClient, TABLES } from "../config/supabase.js";
+import { clearFechamentoCache, TABLE_MONTHLY_ENTRY, TABLE_MONTHLY_NOTE, TABLE_MONTHLY_OBSERVATION } from "./fechamento.js";
+import { clearMonthlyClosingCache } from "./fechamentoMensalApi.js";
 import { classifySector, classifyType, competenceKey, detailType, monthKey, normalizeReason, safeStore } from "./classificacao.js";
 
 const STORAGE_KEY = "gestao_perdas_local_db_v2";
 const PRIMARY_PERSISTENCE = "remote";
 
+const STORE_PATH_HINTS = [
+  { match: "SOL 6 CD", value: "SOL 6 CD" },
+  { match: "SOL 7", value: "SOL 7" },
+  { match: "SOL 4", value: "SOL 4" },
+  { match: "SOL 3", value: "SOL 3" },
+  { match: "SOL 2", value: "SOL 2" },
+  { match: "SOL 1", value: "SOL 1" }
+];
+
+const TYPE_PATH_HINTS = [
+  { match: "SAIDA DE UM PARA OUTRO", value: "Saida entre lojas" },
+  { match: "USO E CONSUMO", value: "Uso/Consumo" },
+  { match: "PERDAS", value: "Perdas" }
+];
+
 const persistenceState = {
   mode: "remote",
   detail: ""
 };
+
+const RESET_IMPORT_RPC = "reset_import_data";
+const SUPABASE_PAGE_SIZE = 1000;
 
 function setPersistence(mode, detail = "") {
   persistenceState.mode = mode;
@@ -47,21 +67,45 @@ function chunkArray(items, size = 200) {
   return chunks;
 }
 
+function normalizeStoreValue(value) {
+  return value || "Nao identificada";
+}
+
+function normalizeTypeValue(value) {
+  return value || "Nao identificado";
+}
+
+function normalizeSectorValue(value) {
+  return value || "Nao classificado";
+}
+
+function normalizeDateValue(value) {
+  return value || "";
+}
+
+function normalizeMonthValue(value, dateValue, formatter) {
+  return value || formatter(dateValue) || "Sem data";
+}
+
 function mapRowToItem(row) {
+  const dateValue = normalizeDateValue(row.emission_date);
+  const storeValue = normalizeStoreValue(row.store);
+  const typeValue = normalizeTypeValue(row.type);
+  const sectorValue = normalizeSectorValue(row.sector);
   return {
     id: row.id,
     noteKey: row.note_key,
     accessKey: row.access_key || "",
     fileName: row.source_file || "",
     invoice: row.invoice || "-",
-    store: row.store || "Loja nao identificada",
-    date: row.emission_date || "",
-    emissionMonth: row.emission_month || monthKey(row.emission_date),
-    competenceMonth: row.competence_month || competenceKey(row.emission_date),
+    store: storeValue,
+    date: dateValue,
+    emissionMonth: normalizeMonthValue(row.emission_month, dateValue, monthKey),
+    competenceMonth: normalizeMonthValue(row.competence_month, dateValue, competenceKey),
     operation: row.operation || "",
-    type: row.type || "Outros",
-    displayType: row.display_type || detailType(row.type, row.sector),
-    sector: row.sector || "Nao classificado",
+    type: typeValue,
+    displayType: row.display_type || detailType(typeValue, sectorValue),
+    sector: sectorValue,
     sectorManual: Boolean(row.sector_manual),
     product: row.product || "Produto",
     quantity: Number(row.quantity || 0),
@@ -73,48 +117,26 @@ function mapRowToItem(row) {
 }
 
 function mapRowToNote(row) {
+  const dateValue = normalizeDateValue(row.emission_date);
+  const storeValue = normalizeStoreValue(row.store);
+  const typeValue = normalizeTypeValue(row.type);
+  const sectorValue = normalizeSectorValue(row.sector);
   return {
     noteKey: row.note_key,
     accessKey: row.access_key || "",
     fileName: row.source_file || "",
     invoice: row.invoice || "-",
-    store: row.store || "Loja nao identificada",
-    date: row.emission_date || "",
-    emissionMonth: row.emission_month || monthKey(row.emission_date),
-    competenceMonth: row.competence_month || competenceKey(row.emission_date),
+    store: storeValue,
+    date: dateValue,
+    emissionMonth: normalizeMonthValue(row.emission_month, dateValue, monthKey),
+    competenceMonth: normalizeMonthValue(row.competence_month, dateValue, competenceKey),
     operation: row.operation || "",
-    type: row.type || "Outros",
-    displayType: row.display_type || detailType(row.type, row.sector),
-    sector: row.sector || "Nao classificado",
+    type: typeValue,
+    displayType: row.display_type || detailType(typeValue, sectorValue),
+    sector: sectorValue,
     sectorManual: Boolean(row.sector_manual),
     totalValue: Number(row.total_value || 0),
     itemCount: Number(row.item_count || 0)
-  };
-}
-
-function mapItemToRow(item) {
-  return {
-    id: item.id,
-    note_key: item.noteKey,
-    item_index: item.itemIndex || Number(String(item.id).split("::").pop()) || 0,
-    access_key: item.accessKey || null,
-    source_file: item.fileName || "",
-    invoice: item.invoice || "-",
-    store: item.store || "Loja nao identificada",
-    emission_date: item.date || null,
-    emission_month: item.emissionMonth || monthKey(item.date),
-    competence_month: item.competenceMonth || competenceKey(item.date),
-    operation: item.operation || "",
-    type: item.type || "Outros",
-    display_type: item.displayType || detailType(item.type, item.sector),
-    sector: item.sector || "Nao classificado",
-    sector_manual: Boolean(item.sectorManual),
-    product: item.product || "Produto",
-    quantity: Number(item.quantity || 0),
-    unit_value: Number(item.unitValue || 0),
-    value: Number(item.value || 0),
-    reason: normalizeReason(item.reason),
-    selected: Boolean(item.selected)
   };
 }
 
@@ -150,6 +172,12 @@ function writeLocalDatabase(database) {
   }));
 }
 
+export function clearImportLocalCache() {
+  writeLocalDatabase({ notes: [], items: [] });
+  clearFechamentoCache();
+  clearMonthlyClosingCache();
+}
+
 function localDetail() {
   return "Supabase indisponivel; exibindo fallback temporario do navegador.";
 }
@@ -178,62 +206,221 @@ async function withLocalFallback(remoteAction, fallbackAction) {
   }
 }
 
-async function loadNotesFromDatabase(client) {
-  const { data, error } = await client
-    .from(TABLES.notes)
-    .select("*")
-    .order("emission_date", { ascending: false, nullsFirst: false })
-    .order("invoice", { ascending: true });
+async function fetchAllRows(builder, entityLabel) {
+  const rows = [];
+  let from = 0;
 
-  if (error) throw buildFriendlyError("Nao foi possivel carregar as notas salvas no banco.", error);
-  return (data || []).map(mapRowToNote);
+  while (true) {
+    const to = from + SUPABASE_PAGE_SIZE - 1;
+    const { data, error } = await builder(from, to);
+    if (error) throw buildFriendlyError(`Nao foi possivel carregar ${entityLabel} no banco.`, error);
+    const pageRows = data || [];
+    rows.push(...pageRows);
+    if (pageRows.length < SUPABASE_PAGE_SIZE) break;
+    from += SUPABASE_PAGE_SIZE;
+  }
+
+  return rows;
+}
+
+async function loadNotesFromDatabase(client) {
+  const rows = await fetchAllRows(
+    (from, to) => client
+      .from(TABLES.notes)
+      .select("*")
+      .order("emission_date", { ascending: false, nullsFirst: false })
+      .order("invoice", { ascending: true })
+      .range(from, to),
+    "todas as notas importadas"
+  );
+
+  return rows.map(mapRowToNote);
 }
 
 async function loadItemsFromDatabase(client) {
-  const { data, error } = await client
-    .from(TABLES.items)
-    .select("*")
-    .order("emission_date", { ascending: false, nullsFirst: false })
-    .order("item_index", { ascending: true });
+  const rows = await fetchAllRows(
+    (from, to) => client
+      .from(TABLES.items)
+      .select("*")
+      .order("emission_date", { ascending: false, nullsFirst: false })
+      .order("item_index", { ascending: true })
+      .range(from, to),
+    "todos os itens importados"
+  );
 
-  if (error) throw buildFriendlyError("Nao foi possivel carregar os itens salvos no banco.", error);
-  return (data || []).map(mapRowToItem);
+  return rows.map(mapRowToItem);
+}
+
+function getFileLabel(file) {
+  return file.webkitRelativePath || file.relativePath || file.name;
+}
+
+function normalizePathValue(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\\/]+/g, "/")
+    .toUpperCase();
+}
+
+function detectStoreFromPath(fileLabel) {
+  const normalized = normalizePathValue(fileLabel);
+  const match = STORE_PATH_HINTS.find((entry) => normalized.includes(entry.match));
+  return match?.value || "";
+}
+
+function detectTypeFromPath(fileLabel) {
+  const normalized = normalizePathValue(fileLabel);
+  const match = TYPE_PATH_HINTS.find((entry) => normalized.includes(entry.match));
+  return match?.value || "";
+}
+
+function cleanDateValue(value) {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
+}
+
+function buildType(operation, fileLabel) {
+  return detectTypeFromPath(fileLabel) || classifyType(operation);
+}
+
+function buildStore(storeFromXml, fileLabel) {
+  return detectStoreFromPath(fileLabel) || safeStore(storeFromXml);
+}
+
+function buildDisplayType(type, sector) {
+  if (type === "Saida entre lojas") return "Saida entre lojas";
+  return detailType(type, sector);
+}
+
+function getItemSector(operation, product, type) {
+  if (type === "Saida entre lojas") return "Saida de um para outro";
+  return classifySector(operation, product);
+}
+
+function buildNoteIdentity({ accessKey, invoice, store, date, totalValue }) {
+  const normalizedDate = cleanDateValue(date) || "";
+  if (accessKey) return accessKey;
+  return [invoice || "-", store || "Loja nao identificada", normalizedDate, Number(totalValue || 0).toFixed(2)].join("::");
+}
+
+function buildConsoleContext(parsedEntry) {
+  return {
+    arquivo: parsedEntry.fileLabel,
+    loja: parsedEntry.note.store,
+    tipo: parsedEntry.note.type,
+    nota: parsedEntry.note.invoice,
+    itens: parsedEntry.items.length
+  };
+}
+
+function logImportEvent(status, parsedEntry, extra = {}) {
+  const context = buildConsoleContext(parsedEntry);
+  console.log("[importacao-xml]", {
+    status,
+    ...context,
+    ...extra
+  });
+}
+
+function createParserError(fileName) {
+  return new Error(`O arquivo ${fileName} nao e um XML valido.`);
+}
+
+function createImportSummary(totalSelectedFiles, totalXmlFiles) {
+  return {
+    totalSelectedFiles,
+    totalXmlFiles,
+    importedNotes: 0,
+    skippedNotes: 0,
+    errorCount: 0,
+    invalidFiles: [],
+    errors: [],
+    processedFiles: []
+  };
+}
+
+function pushImportError(summary, fileLabel, error, parsedEntry = null) {
+  const reason = error?.userMessage || error?.message || "Falha desconhecida ao importar o XML.";
+  summary.errorCount += 1;
+  summary.errors.push({
+    file: fileLabel,
+    note: parsedEntry?.note?.invoice || "-",
+    store: parsedEntry?.note?.store || "Nao identificado",
+    type: parsedEntry?.note?.type || "Nao identificado",
+    reason
+  });
+  summary.processedFiles.push({
+    file: fileLabel,
+    status: "erro",
+    note: parsedEntry?.note?.invoice || "-",
+    store: parsedEntry?.note?.store || "Nao identificado",
+    type: parsedEntry?.note?.type || "Nao identificado",
+    itemCount: parsedEntry?.items?.length || 0,
+    reason
+  });
+}
+
+function markDuplicate(summary, parsedEntry, duplicateReason) {
+  summary.skippedNotes += 1;
+  summary.processedFiles.push({
+    file: parsedEntry.fileLabel,
+    status: "duplicado",
+    note: parsedEntry.note.invoice,
+    store: parsedEntry.note.store,
+    type: parsedEntry.note.type,
+    itemCount: parsedEntry.items.length,
+    reason: duplicateReason
+  });
+}
+
+function markImported(summary, parsedEntry) {
+  summary.importedNotes += 1;
+  summary.processedFiles.push({
+    file: parsedEntry.fileLabel,
+    status: "importado",
+    note: parsedEntry.note.invoice,
+    store: parsedEntry.note.store,
+    type: parsedEntry.note.type,
+    itemCount: parsedEntry.items.length,
+    reason: "Importado com sucesso"
+  });
 }
 
 export function parseXmlFile(text, fileName) {
   const parser = new DOMParser();
   const xml = parser.parseFromString(text, "text/xml");
-  if (xml.querySelector("parsererror")) throw new Error(`O arquivo ${fileName} nao e um XML valido.`);
+  if (xml.querySelector("parsererror")) throw createParserError(fileName);
 
   const ide = xml.getElementsByTagNameNS("*", "ide")[0] || xml;
   const emit = xml.getElementsByTagNameNS("*", "emit")[0] || xml;
   const operation = getText(ide, "natOp") || "SEM OPERACAO";
   const invoice = getText(ide, "nNF") || "-";
   const date = getText(ide, "dhEmi") || getText(ide, "dEmi") || "";
-  const store = safeStore(getText(emit, "xFant") || getText(emit, "xNome"));
   const accessKey = getAccessKey(xml);
-  const noteKey = accessKey || [invoice, store, date, operation].join("::");
+  const xmlStore = getText(emit, "xFant") || getText(emit, "xNome");
+  const store = buildStore(xmlStore, fileName);
+  const type = buildType(operation, fileName);
   const dets = [...xml.getElementsByTagNameNS("*", "det")];
-  const type = classifyType(operation);
 
   const items = dets.map((det, index) => {
     const productNode = det.getElementsByTagNameNS("*", "prod")[0] || det;
     const product = getText(productNode, "xProd") || "Produto";
-    const sector = classifySector(operation, product);
+    const sector = getItemSector(operation, product, type);
     return {
-      id: `${noteKey}::${index + 1}`,
-      note_key: noteKey,
       item_index: index + 1,
       access_key: accessKey || null,
       source_file: fileName,
       invoice,
       store,
-      emission_date: date || null,
+      emission_date: cleanDateValue(date),
       emission_month: monthKey(date),
       competence_month: competenceKey(date),
       operation,
       type,
-      display_type: detailType(type, sector),
+      display_type: buildDisplayType(type, sector),
       sector,
       sector_manual: false,
       product,
@@ -245,27 +432,39 @@ export function parseXmlFile(text, fileName) {
     };
   });
 
+  if (!items.length) {
+    throw new Error(`O arquivo ${fileName} nao possui itens de produto na nota.`);
+  }
+
   const totalValue = items.reduce((sum, item) => sum + Number(item.value || 0), 0);
+  const noteKey = buildNoteIdentity({ accessKey, invoice, store, date, totalValue });
+
+  const finalizedItems = items.map((item) => ({
+    ...item,
+    id: `${noteKey}::${item.item_index}`,
+    note_key: noteKey
+  }));
 
   return {
+    fileLabel: fileName,
     note: {
       note_key: noteKey,
       access_key: accessKey || null,
       source_file: fileName,
       invoice,
       store,
-      emission_date: date || null,
+      emission_date: cleanDateValue(date),
       emission_month: monthKey(date),
       competence_month: competenceKey(date),
       operation,
       type,
-      display_type: detailType(type, items[0]?.sector || "Nao classificado"),
-      sector: items[0]?.sector || "Nao classificado",
+      display_type: buildDisplayType(type, finalizedItems[0]?.sector || "Nao classificado"),
+      sector: finalizedItems[0]?.sector || "Nao classificado",
       sector_manual: false,
       total_value: totalValue,
-      item_count: items.length
+      item_count: finalizedItems.length
     },
-    items
+    items: finalizedItems
   };
 }
 
@@ -275,7 +474,6 @@ export async function loadAllItems() {
 }
 
 export async function loadAllData() {
-  // Fonte oficial do sistema: Supabase. O fallback local existe apenas como contingencia temporaria.
   try {
     const client = getSupabaseClient();
     const notes = await loadNotesFromDatabase(client);
@@ -299,95 +497,180 @@ export async function loadAllData() {
   }
 }
 
-async function verifyImportedData(client, parsedEntries) {
-  const noteKeys = parsedEntries.map((entry) => entry.note.note_key);
-  const expectedItemCountByNote = new Map(parsedEntries.map((entry) => [entry.note.note_key, entry.items.length]));
-
-  const { data: noteRows, error: notesError } = await client
+async function getExistingNoteByKey(client, noteKey) {
+  const { data, error } = await client
     .from(TABLES.notes)
     .select("note_key, item_count")
-    .in("note_key", noteKeys);
-  if (notesError) throw buildFriendlyError("Falha ao confirmar as notas salvas no banco.", notesError);
+    .eq("note_key", noteKey)
+    .limit(1)
+    .maybeSingle();
 
-  const { data: itemRows, error: itemsError } = await client
+  if (error) throw buildFriendlyError("Falha ao consultar duplicidade da nota.", error);
+  return data || null;
+}
+
+async function getExistingNoteByAccessKey(client, accessKey) {
+  if (!accessKey) return null;
+  const { data, error } = await client
+    .from(TABLES.notes)
+    .select("note_key, item_count")
+    .eq("access_key", accessKey)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw buildFriendlyError("Falha ao consultar duplicidade pela chave de acesso.", error);
+  return data || null;
+}
+
+async function getExistingNoteByComposite(client, note) {
+  const { data, error } = await client
+    .from(TABLES.notes)
+    .select("note_key, item_count")
+    .eq("invoice", note.invoice)
+    .eq("store", note.store)
+    .eq("total_value", note.total_value)
+    .eq("emission_date", note.emission_date)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw buildFriendlyError("Falha ao consultar duplicidade pelos dados da nota.", error);
+  return data || null;
+}
+
+async function getSavedItemCount(client, noteKey) {
+  const { count, error } = await client
     .from(TABLES.items)
-    .select("note_key")
-    .in("note_key", noteKeys);
-  if (itemsError) throw buildFriendlyError("Falha ao confirmar os itens salvos no banco.", itemsError);
+    .select("id", { count: "exact", head: true })
+    .eq("note_key", noteKey);
 
-  const savedNotes = new Map((noteRows || []).map((row) => [row.note_key, Number(row.item_count || 0)]));
-  const savedItemCountByNote = new Map();
-  (itemRows || []).forEach((row) => {
-    savedItemCountByNote.set(row.note_key, (savedItemCountByNote.get(row.note_key) || 0) + 1);
-  });
+  if (error) throw buildFriendlyError(`Falha ao conferir os itens salvos da nota ${noteKey}.`, error);
+  return Number(count || 0);
+}
 
-  for (const noteKey of noteKeys) {
-    if (!savedNotes.has(noteKey)) {
-      throw buildFriendlyError(`A nota ${noteKey} nao foi localizada no Supabase apos a importacao.`, new Error("missing_note_after_import"));
-    }
+async function detectDuplicate(client, parsedEntry) {
+  const { note, items } = parsedEntry;
+  const candidates = [
+    { row: await getExistingNoteByKey(client, note.note_key), reason: "Nota ja existe pela chave interna." },
+    { row: await getExistingNoteByAccessKey(client, note.access_key), reason: "Nota ja existe pela chave de acesso." },
+    { row: await getExistingNoteByComposite(client, note), reason: "Nota ja existe pela combinacao emitente/numero/valor/data." }
+  ].filter((candidate) => candidate.row?.note_key);
 
-    const expectedCount = expectedItemCountByNote.get(noteKey) || 0;
-    const savedCount = savedItemCountByNote.get(noteKey) || 0;
-    const savedHeaderCount = savedNotes.get(noteKey) || 0;
-    if (savedCount < expectedCount || savedHeaderCount < expectedCount) {
-      throw buildFriendlyError(`A nota ${noteKey} foi salva de forma incompleta no Supabase.`, new Error("partial_items_after_import"));
+  if (!candidates.length) return { duplicate: false, existingNoteKey: null, reason: "" };
+
+  const candidate = candidates[0];
+  const savedItemCount = await getSavedItemCount(client, candidate.row.note_key);
+  if (savedItemCount >= items.length) {
+    return {
+      duplicate: true,
+      existingNoteKey: candidate.row.note_key,
+      reason: candidate.reason
+    };
+  }
+
+  return {
+    duplicate: false,
+    existingNoteKey: candidate.row.note_key,
+    reason: `${candidate.reason} A nota sera reparada porque os itens salvos estao incompletos.`
+  };
+}
+
+async function saveNote(client, note) {
+  const { error } = await client
+    .from(TABLES.notes)
+    .upsert([note], { onConflict: "note_key" });
+
+  if (error) throw buildFriendlyError(`Falha ao salvar a nota ${note.invoice} no banco.`, error);
+}
+
+async function saveItems(client, parsedEntry) {
+  for (const chunk of chunkArray(parsedEntry.items, 300)) {
+    if (!chunk.length) continue;
+    const { error } = await client
+      .from(TABLES.items)
+      .upsert(chunk, { onConflict: "id" });
+
+    if (error) {
+      throw buildFriendlyError(`A nota ${parsedEntry.note.invoice} foi salva, mas os itens falharam ao gravar no banco.`, error);
     }
   }
 }
 
-function dedupeParsedEntries(entries) {
-  const entriesByNoteKey = new Map();
-  entries.forEach((entry) => {
-    if (!entry?.note?.note_key) return;
-    entriesByNoteKey.set(entry.note.note_key, entry);
-  });
-  return [...entriesByNoteKey.values()];
+async function verifyImportedEntry(client, parsedEntry) {
+  const noteKey = parsedEntry.note.note_key;
+  const existingNote = await getExistingNoteByKey(client, noteKey);
+  if (!existingNote) {
+    throw buildFriendlyError(`A nota ${parsedEntry.note.invoice} nao foi localizada apos a importacao.`, new Error("missing_note_after_import"));
+  }
+
+  const savedItemCount = await getSavedItemCount(client, noteKey);
+  if (savedItemCount < parsedEntry.items.length) {
+    throw buildFriendlyError(`A nota ${parsedEntry.note.invoice} foi salva de forma incompleta.`, new Error("partial_items_after_import"));
+  }
 }
 
-export async function importXmlFiles(files) {
-  const parsed = [];
-  const invalidFiles = [];
+async function processSingleXml(client, file, summary, index, totalXmlFiles, onProgress) {
+  const fileLabel = getFileLabel(file);
+  onProgress?.({
+    current: index + 1,
+    total: totalXmlFiles,
+    fileLabel,
+    message: `Importando ${index + 1} de ${totalXmlFiles}...`
+  });
 
-  for (const file of files) {
+  let parsedEntry;
+
+  try {
     const text = await file.text();
-    try {
-      parsed.push(parseXmlFile(text, file.name));
-    } catch (error) {
-      invalidFiles.push(file.name);
-      console.error(error);
-    }
+    parsedEntry = parseXmlFile(text, fileLabel);
+    logImportEvent("lido", parsedEntry);
+  } catch (error) {
+    console.error(error);
+    summary.invalidFiles.push(fileLabel);
+    pushImportError(summary, fileLabel, error);
+    console.error("[importacao-xml]", { status: "erro_parse", arquivo: fileLabel, motivo: error.message });
+    return;
   }
 
-  const uniqueParsed = dedupeParsedEntries(parsed);
-  if (!uniqueParsed.length) return { importedNotes: 0, skippedNotes: 0, invalidFiles };
-
-  return requireRemote(
-    async () => {
-      const client = getSupabaseClient();
-      const noteRows = uniqueParsed.map((entry) => entry.note);
-      const itemRows = uniqueParsed.flatMap((entry) => entry.items);
-
-      for (const noteChunk of chunkArray(noteRows, 100)) {
-        if (!noteChunk.length) continue;
-        const { error } = await client.from(TABLES.notes).upsert(noteChunk, { onConflict: "note_key" });
-        if (error) throw buildFriendlyError("Falha ao salvar as notas importadas no banco.", error);
-      }
-
-      for (const itemChunk of chunkArray(itemRows, 300)) {
-        if (!itemChunk.length) continue;
-        const { error } = await client.from(TABLES.items).upsert(itemChunk, { onConflict: "id" });
-        if (error) throw buildFriendlyError("Falha ao salvar os itens importados no banco.", error);
-      }
-
-      await verifyImportedData(client, uniqueParsed);
-
-      return {
-        importedNotes: uniqueParsed.length,
-        skippedNotes: Math.max(parsed.length - uniqueParsed.length, 0),
-        invalidFiles
-      };
+  try {
+    const duplicateCheck = await detectDuplicate(client, parsedEntry);
+    if (duplicateCheck.reason) {
+      logImportEvent(duplicateCheck.duplicate ? "duplicado" : "reparando", parsedEntry, { detalhe: duplicateCheck.reason });
     }
-  );
+
+    if (duplicateCheck.duplicate) {
+      markDuplicate(summary, parsedEntry, duplicateCheck.reason);
+      return;
+    }
+
+    await saveNote(client, parsedEntry.note);
+    await saveItems(client, parsedEntry);
+    await verifyImportedEntry(client, parsedEntry);
+
+    logImportEvent("importado", parsedEntry, { detalhe: "Importado com sucesso" });
+    markImported(summary, parsedEntry);
+  } catch (error) {
+    console.error(error);
+    logImportEvent("erro", parsedEntry, { motivo: error.userMessage || error.message });
+    pushImportError(summary, fileLabel, error, parsedEntry);
+  }
+}
+
+export async function importXmlFiles(files, options = {}) {
+  const fileList = Array.from(files || []);
+  const xmlFiles = fileList.filter((file) => /\.xml$/i.test(file.name || ""));
+  const summary = createImportSummary(fileList.length, xmlFiles.length);
+
+  if (!xmlFiles.length) return summary;
+
+  return requireRemote(async () => {
+    const client = getSupabaseClient();
+
+    for (let index = 0; index < xmlFiles.length; index += 1) {
+      await processSingleXml(client, xmlFiles[index], summary, index, xmlFiles.length, options.onProgress);
+    }
+
+    return summary;
+  });
 }
 
 export async function updateItemField(itemId, fields) {
@@ -461,21 +744,53 @@ export async function deleteNote(noteKey) {
   );
 }
 
-export async function clearDatabase() {
+async function clearRemoteTable(client, tableName, keyField) {
+  const { data, error } = await client.from(tableName).select(keyField);
+  if (error) throw error;
+
+  const keys = (data || []).map((row) => row[keyField]).filter(Boolean);
+  for (const chunk of chunkArray(keys, 200)) {
+    if (!chunk.length) continue;
+    const { error: deleteError } = await client.from(tableName).delete().in(keyField, chunk);
+    if (deleteError) throw deleteError;
+  }
+}
+
+async function tryResetImportRpc(client, includeMonthlyClosing) {
+  try {
+    const { error } = await client.rpc(RESET_IMPORT_RPC, {
+      include_monthly_closing: includeMonthlyClosing
+    });
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.warn("[reset-import-data] RPC indisponivel, aplicando fallback com deletes seguros.", error);
+    return false;
+  }
+}
+
+async function clearImportTablesWithFallback(client, includeMonthlyClosing) {
+  await clearRemoteTable(client, TABLES.items, "id");
+  await clearRemoteTable(client, TABLES.notes, "note_key");
+
+  if (!includeMonthlyClosing) return;
+
+  await clearRemoteTable(client, TABLE_MONTHLY_OBSERVATION, "id");
+  await clearRemoteTable(client, TABLE_MONTHLY_NOTE, "id");
+  await clearRemoteTable(client, TABLE_MONTHLY_ENTRY, "id");
+}
+
+export async function clearDatabase(options = {}) {
+  const includeMonthlyClosing = Boolean(options.includeMonthlyClosing);
   return withLocalFallback(
     async () => {
       const client = getSupabaseClient();
-      const { data, error } = await client.from(TABLES.notes).select("note_key");
-      if (error) throw error;
-      const noteKeys = (data || []).map((row) => row.note_key);
-      for (const chunk of chunkArray(noteKeys, 100)) {
-        if (!chunk.length) continue;
-        const { error: deleteError } = await client.from(TABLES.notes).delete().in("note_key", chunk);
-        if (deleteError) throw deleteError;
-      }
+      const rpcHandled = await tryResetImportRpc(client, includeMonthlyClosing);
+      if (!rpcHandled) await clearImportTablesWithFallback(client, includeMonthlyClosing);
+      clearImportLocalCache();
     },
     async () => {
-      writeLocalDatabase({ notes: [], items: [] });
+      clearImportLocalCache();
     }
   );
 }

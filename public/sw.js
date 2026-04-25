@@ -1,4 +1,4 @@
-const CACHE_NAME = "razarth-cache-v1";
+const CACHE_NAME = "razarth-cache-v2";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -35,6 +35,22 @@ self.addEventListener("fetch", (event) => {
 
   if (requestUrl.origin !== self.location.origin) {
     event.respondWith(fetch(event.request));
+    return;
+  }
+
+  const isAppShellAsset = APP_ASSETS.some((asset) => requestUrl.pathname.endsWith(asset.replace(/^\.\//, "/")));
+
+  if (isAppShellAsset || requestUrl.pathname === "/" || requestUrl.pathname.endsWith("/index.html")) {
+    event.respondWith(
+      fetch(event.request).then((networkResponse) => {
+        const cloned = networkResponse.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, cloned));
+        return networkResponse;
+      }).catch(async () => {
+        const cachedResponse = await caches.match(event.request);
+        return cachedResponse || caches.match("./index.html");
+      })
+    );
     return;
   }
 

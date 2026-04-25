@@ -21,11 +21,12 @@ const refs = {
   applySelectedBtn: document.getElementById("applySelectedBtn"),
   selectAll: document.getElementById("selectAll"),
   xmlFiles: document.getElementById("xmlFiles"),
+  xmlFolder: document.getElementById("xmlFolder"),
+  clearDatabaseBtn: document.getElementById("clearDatabaseBtn"),
   productSearch: document.getElementById("productSearch"),
   pendingOnlyBtn: document.getElementById("pendingOnlyBtn"),
   csvBtn: document.getElementById("csvBtn"),
   reportBtn: document.getElementById("reportBtn"),
-  clearBtn: document.getElementById("clearBtn"),
   classBody: document.getElementById("classBody"),
   noteSummary: document.getElementById("noteSummary"),
   itemsBody: document.getElementById("itemsBody"),
@@ -35,6 +36,9 @@ const refs = {
   productRanking: document.getElementById("productRanking"),
   monthChart: document.getElementById("monthChart"),
   typeChart: document.getElementById("typeChart"),
+  sectorChart: document.getElementById("sectorChart"),
+  sectorChartEmpty: document.getElementById("sectorChartEmpty"),
+  sectorChartSummary: document.getElementById("sectorChartSummary"),
   pendingExecutive: document.getElementById("pendingExecutive"),
   pendingExecutiveTitle: document.getElementById("pendingExecutiveTitle"),
   pendingExecutiveText: document.getElementById("pendingExecutiveText"),
@@ -55,7 +59,19 @@ const refs = {
   statusBanner: document.getElementById("statusBanner"),
   loadingOverlay: document.getElementById("loadingOverlay"),
   loadingText: document.getElementById("loadingText"),
+  loadingProgressShell: document.getElementById("loadingProgressShell"),
+  loadingProgressMeta: document.getElementById("loadingProgressMeta"),
+  loadingProgressBar: document.getElementById("loadingProgressBar"),
   toast: document.getElementById("toast"),
+  importSummaryModal: document.getElementById("importSummaryModal"),
+  importSummaryTitle: document.getElementById("importSummaryTitle"),
+  importSummaryContent: document.getElementById("importSummaryContent"),
+  importSummaryClose: document.getElementById("importSummaryClose"),
+  resetImportModal: document.getElementById("resetImportModal"),
+  resetImportClose: document.getElementById("resetImportClose"),
+  resetImportConfirmBtn: document.getElementById("resetImportConfirmBtn"),
+  resetImportConfirmInput: document.getElementById("resetImportConfirmInput"),
+  resetImportMonthlyToggle: document.getElementById("resetImportMonthlyToggle"),
   themeToggle: document.getElementById("themeToggle"),
   themeToggleLabel: document.getElementById("themeToggleLabel"),
   currentDate: document.getElementById("currentDate"),
@@ -69,8 +85,16 @@ const state = {
   items: [],
   notes: [],
   filtered: [],
+  totals: {
+    bankNotes: 0,
+    bankItems: 0,
+    filteredNotes: 0,
+    displayedNotes: 0,
+    orphanNotes: 0
+  },
   monthChart: null,
   typeChart: null,
+  sectorChart: null,
   realtimeCleanup: null,
   realtimeTimer: null,
   toastTimer: null,
@@ -114,16 +138,112 @@ function setLoading(active, message = "Aguarde enquanto o sistema atualiza as in
   refs.loadingOverlay.hidden = !active;
 }
 
+function updateLoadingProgress(current, total, fileLabel = "") {
+  if (!refs.loadingProgressShell || !refs.loadingProgressBar || !refs.loadingProgressMeta) return;
+  if (!total) {
+    refs.loadingProgressShell.hidden = true;
+    refs.loadingProgressBar.style.width = "0%";
+    refs.loadingProgressMeta.textContent = "Preparando importacao...";
+    return;
+  }
+
+  const safeTotal = Math.max(total, 1);
+  const percent = Math.min(100, Math.round((current / safeTotal) * 100));
+  refs.loadingProgressShell.hidden = false;
+  refs.loadingProgressBar.style.width = `${percent}%`;
+  refs.loadingProgressMeta.textContent = fileLabel
+    ? `Importando ${current} de ${total}: ${fileLabel}`
+    : `Importando ${current} de ${total}...`;
+}
+
+function closeImportSummary() {
+  if (refs.importSummaryModal) refs.importSummaryModal.hidden = true;
+}
+
+function isAdminTestModeEnabled() {
+  const search = new URLSearchParams(window.location.search);
+  const byQuery = ["admin", "modo", "mode", "teste", "test"].some((key) => {
+    const value = search.get(key);
+    return value === "1" || value === "true" || value === "admin" || value === "teste" || value === "test";
+  });
+  const byHash = /admin|teste|test/i.test(window.location.hash || "");
+  const byPath = /admin/i.test(window.location.pathname || "");
+  const byHost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+  const byStorage = window.localStorage.getItem("razarth-admin-mode") === "enabled";
+  return byQuery || byHash || byPath || byHost || byStorage;
+}
+
+function applyAdminTestModeVisibility() {
+  if (!refs.clearDatabaseBtn) return;
+  refs.clearDatabaseBtn.hidden = !isAdminTestModeEnabled();
+}
+
+function closeResetImportModal() {
+  if (refs.resetImportModal) refs.resetImportModal.hidden = true;
+  if (refs.resetImportConfirmInput) refs.resetImportConfirmInput.value = "";
+  if (refs.resetImportMonthlyToggle) refs.resetImportMonthlyToggle.checked = false;
+}
+
+function openResetImportModal() {
+  if (!refs.resetImportModal) return;
+  refs.resetImportModal.hidden = false;
+  refs.resetImportConfirmInput?.focus();
+}
+
+function resetScreenState() {
+  state.items = [];
+  state.notes = [];
+  state.filtered = [];
+  refreshUi();
+}
+
+function buildSummaryErrors(errors) {
+  if (!errors.length) return '<div class="empty">Nenhum erro encontrado na importacao.</div>';
+  return `<div class="import-summary-list">${errors.map((entry) => `
+    <article class="import-summary-item">
+      <strong>${entry.file}</strong>
+      <span>Loja: ${entry.store}</span>
+      <span>Tipo: ${entry.type}</span>
+      <span>Nota: ${entry.note}</span>
+      <span>Motivo: ${entry.reason}</span>
+    </article>
+  `).join("")}</div>`;
+}
+
+function openImportSummary(result) {
+  if (!refs.importSummaryModal || !refs.importSummaryTitle || !refs.importSummaryContent) return;
+  refs.importSummaryTitle.textContent = result.errorCount ? "Importacao concluida com pendencias" : "Importacao concluida";
+  refs.importSummaryContent.innerHTML = `
+    <div class="import-summary-grid">
+      <article class="import-summary-card"><span class="label">Arquivos selecionados</span><strong>${result.totalSelectedFiles}</strong></article>
+      <article class="import-summary-card"><span class="label">XML encontrados</span><strong>${result.totalXmlFiles}</strong></article>
+      <article class="import-summary-card"><span class="label">Importados</span><strong>${result.importedNotes}</strong></article>
+      <article class="import-summary-card"><span class="label">Duplicados</span><strong>${result.skippedNotes}</strong></article>
+      <article class="import-summary-card"><span class="label">Com erro</span><strong>${result.errorCount}</strong></article>
+    </div>
+    <section>
+      <h4>Arquivos com erro</h4>
+      ${buildSummaryErrors(result.errors)}
+    </section>
+  `;
+  refs.importSummaryModal.hidden = false;
+}
+
 function syncState(database) {
   state.items = (database.items || [])
     .map((item) => ({ ...item, reason: normalizeReason(item.reason) }))
     .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")));
   state.notes = groupItemsByNote(state.items, database.notes || []);
+  state.totals.bankNotes = (database.notes || []).length;
+  state.totals.bankItems = state.items.length;
+  state.totals.orphanNotes = state.notes.filter((note) => !note.items?.length).length;
 }
 
 function refreshUi() {
   refreshFilters(state, refs);
   state.filtered = applyFilters(state, refs);
+  state.totals.filteredNotes = new Set(state.filtered.map((item) => item.noteKey)).size;
+  state.totals.displayedNotes = state.totals.filteredNotes;
   buildNoteOptions(state, refs);
   renderDashboard(state, refs);
   renderItems(state, refs);
@@ -136,6 +256,12 @@ async function reloadFromDatabase({ loadingMessage, statusMessage, emptyMessage 
     const database = await loadAllData();
     syncState(database);
     refreshUi();
+    console.log("[Dashboard] Banco oficial:", {
+      totalNotasBanco: state.totals.bankNotes,
+      totalItensBanco: state.totals.bankItems,
+      totalNotasComItens: state.notes.length,
+      totalNotasSemItens: state.totals.orphanNotes
+    });
     const persistence = getPersistenceInfo();
     if (persistence.mode === "local") {
       const message = state.items.length
@@ -150,8 +276,14 @@ async function reloadFromDatabase({ loadingMessage, statusMessage, emptyMessage 
         ? ` ${state.items.length} item(ns) tambem foram carregados.`
         : " Os itens ainda nao puderam ser lidos do banco.";
       setStatus("warning", `${noteMessage}${itemMessage} ${persistence.detail}`.trim());
-    } else if (state.items.length) setStatus("success", statusMessage || `${state.items.length} itens carregados em ${state.notes.length} nota(s).`);
-    else if (state.notes.length) setStatus("success", statusMessage || `${state.notes.length} nota(s) carregada(s) do banco.`);
+    } else if (state.items.length) {
+      const metrics = `Banco: ${state.totals.bankNotes} nota(s). Filtro: ${state.totals.filteredNotes} nota(s). Tela: ${state.totals.displayedNotes} nota(s).`;
+      const orphanMessage = state.totals.orphanNotes ? ` ${state.totals.orphanNotes} nota(s) estao sem itens associados.` : "";
+      setStatus("success", statusMessage || `${metrics}${orphanMessage}`.trim());
+    } else if (state.notes.length) {
+      const orphanMessage = state.totals.orphanNotes ? ` ${state.totals.orphanNotes} nota(s) estao sem itens associados.` : "";
+      setStatus("success", statusMessage || `${state.notes.length} nota(s) carregada(s) do banco.${orphanMessage}`.trim());
+    }
     else setStatus("info", emptyMessage || "Nenhum XML importado ainda.");
   } catch (error) {
     setStatus("error", error.userMessage || "Nao foi possivel carregar os dados do painel.");
@@ -185,25 +317,33 @@ async function handleImport(files) {
   if (!files.length) return;
   const totalFiles = files.length;
   try {
-    setStatus("info", `Importando ${totalFiles} XML(s) para o banco de dados...`);
-    showToast("info", `Importacao iniciada. Enviando ${totalFiles} XML(s) ao Supabase...`, 0);
-    setLoading(true, `Importando ${totalFiles} XML(s) para o banco de dados...`);
-    const result = await importXmlFiles(files);
+    closeImportSummary();
+    updateLoadingProgress(0, 0);
+    setStatus("info", `Iniciando a leitura de ${totalFiles} arquivo(s)...`);
+    showToast("info", `Importacao iniciada. Processando ${totalFiles} arquivo(s)...`, 0);
+    setLoading(true, `Preparando a importacao de ${totalFiles} arquivo(s)...`);
+    const result = await importXmlFiles(files, {
+      onProgress(progress) {
+        setLoading(true, progress.message);
+        updateLoadingProgress(progress.current, progress.total, progress.fileLabel);
+      }
+    });
     await reloadFromDatabase({
       statusMessage: result.importedNotes
-        ? `${result.importedNotes} XML(s) importado(s) e salvos no banco com sucesso.`
+        ? `${result.importedNotes} XML(s) importado(s) com sucesso. ${result.skippedNotes} duplicado(s) ignorado(s). ${result.errorCount} com erro.`
         : "Nenhum XML novo foi encontrado para importacao.",
       emptyMessage: "Nenhum XML importado ainda."
     });
-    if (result.importedNotes && result.skippedNotes) {
-      showToast("warning", `${result.importedNotes} XML(s) foram salvos no banco. Alguns XMLs ja existiam e foram ignorados.`);
-    } else if (result.invalidFiles.length) {
-      showToast("warning", `Alguns arquivos foram ignorados: ${result.invalidFiles.join(", ")}`);
+    openImportSummary(result);
+    if (result.errorCount) {
+      showToast("warning", `Importacao concluida com ${result.errorCount} erro(s). Veja o resumo para os detalhes.`);
+    } else if (result.importedNotes && result.skippedNotes) {
+      showToast("warning", `${result.importedNotes} XML(s) importado(s). ${result.skippedNotes} duplicado(s) foram ignorados.`);
     } else if (result.importedNotes) {
-      showToast("success", "XMLs importados e salvos no banco com sucesso.");
+      showToast("success", `${result.importedNotes} XML(s) importado(s) com sucesso.`);
     } else if (result.skippedNotes) {
-      setStatus("warning", "Alguns XMLs ja existiam e foram ignorados.");
-      showToast("warning", "Alguns XMLs ja existiam e foram ignorados.");
+      setStatus("warning", "Os XMLs selecionados ja existiam e foram ignorados.");
+      showToast("warning", "Os XMLs selecionados ja existiam e foram ignorados.");
     } else {
       showToast("info", "Nenhum XML novo foi encontrado para importacao.");
     }
@@ -213,10 +353,49 @@ async function handleImport(files) {
     showToast("error", message);
   } finally {
     refs.xmlFiles.value = "";
+    if (refs.xmlFolder) refs.xmlFolder.value = "";
+    updateLoadingProgress(0, 0);
     setLoading(false);
     if (!refs.toast.hidden && refs.toast.classList.contains("info")) {
       hideToast();
     }
+  }
+}
+
+async function handleClearDatabase() {
+  const confirmationText = refs.resetImportConfirmInput?.value?.trim();
+  if (confirmationText !== "LIMPAR") {
+    showToast("warning", "Digite exatamente LIMPAR para confirmar a limpeza.");
+    return;
+  }
+
+  const includeMonthlyClosing = Boolean(refs.resetImportMonthlyToggle?.checked);
+
+  try {
+    closeResetImportModal();
+    closeImportSummary();
+    updateLoadingProgress(0, 0);
+    setLoading(true, includeMonthlyClosing ? "Limpando importacoes e fechamento mensal..." : "Limpando loss_items e loss_notes...");
+    setStatus("warning", includeMonthlyClosing
+      ? "Limpando dados de importacao e apoio do fechamento mensal..."
+      : "Limpando os dados atuais de importacao do banco...");
+    await clearDatabase({ includeMonthlyClosing });
+    resetScreenState();
+    await reloadFromDatabase({
+      statusMessage: "Banco limpo com sucesso.",
+      emptyMessage: "Banco limpo. Nenhum XML importado ainda."
+    });
+    showToast("success", includeMonthlyClosing
+      ? "Dados de importacao e fechamento mensal limpos com sucesso."
+      : "Dados de importacao limpos com sucesso.");
+  } catch (error) {
+    console.error("[reset-import-data]", error);
+    const message = error.userMessage || "Nao foi possivel limpar o banco.";
+    setStatus("error", message);
+    showToast("error", message);
+  } finally {
+    updateLoadingProgress(0, 0);
+    setLoading(false);
   }
 }
 
@@ -257,6 +436,17 @@ function bindEvents() {
   });
 
   refs.xmlFiles.addEventListener("change", (event) => handleImport([...event.target.files]));
+  refs.xmlFolder?.addEventListener("change", (event) => handleImport([...event.target.files]));
+  refs.clearDatabaseBtn?.addEventListener("click", openResetImportModal);
+  refs.importSummaryClose?.addEventListener("click", closeImportSummary);
+  refs.importSummaryModal?.addEventListener("click", (event) => {
+    if (event.target === refs.importSummaryModal) closeImportSummary();
+  });
+  refs.resetImportClose?.addEventListener("click", closeResetImportModal);
+  refs.resetImportConfirmBtn?.addEventListener("click", handleClearDatabase);
+  refs.resetImportModal?.addEventListener("click", (event) => {
+    if (event.target === refs.resetImportModal) closeResetImportModal();
+  });
 
   [refs.basis, refs.storeFilter, refs.typeFilter, refs.sectorFilter, refs.reasonFilter, refs.monthFilter].forEach((element) => {
     element.addEventListener("change", () => {
@@ -380,26 +570,12 @@ function bindEvents() {
     }
   });
 
-  refs.clearBtn.addEventListener("click", async () => {
-    if (!window.confirm("Deseja limpar todos os dados ja importados do banco?")) return;
-    try {
-      setLoading(true, "Limpando base de dados...");
-      await clearDatabase();
-      refs.pendingOnlyBtn?.setAttribute("aria-pressed", "false");
-      await reloadFromDatabase({ statusMessage: "Base limpa com sucesso.", emptyMessage: "Nenhum XML importado ainda." });
-      showToast("success", "Base limpa com sucesso.");
-    } catch (error) {
-      setStatus("error", error.userMessage || "Nao foi possivel limpar a base.");
-    } finally {
-      setLoading(false);
-    }
-  });
-
   document.querySelectorAll(".tabbtn").forEach((button) => button.addEventListener("click", () => setTab(button.dataset.tab)));
 }
 
 async function init() {
   state.uiCleanup = initUi(refs);
+  applyAdminTestModeVisibility();
   bindEvents();
   await reloadFromDatabase({
     loadingMessage: "Carregando dados oficiais do Supabase...",
