@@ -1,16 +1,20 @@
-const CACHE_NAME = "razarth-cache-v2";
+const CACHE_NAME = "razarth-cache-v3";
 const APP_ASSETS = [
   "./",
   "./index.html",
+  "./fechamento.html",
   "./styles.css",
+  "./fechamento.css",
   "./manifest.json",
   "./js/main.js",
+  "./js/fechamento.js",
   "./js/services/ui.js",
   "./js/services/dashboard.js",
   "./js/services/filtros.js",
   "./js/services/classificacao.js",
   "./js/services/importacao.js",
   "./js/services/realtime.js",
+  "./js/services/fechamento.js",
   "./js/config/supabase.js",
   "./icons/icon.svg",
   "./icons/icon-192.png",
@@ -35,6 +39,21 @@ self.addEventListener("fetch", (event) => {
 
   if (requestUrl.origin !== self.location.origin) {
     event.respondWith(fetch(event.request));
+    return;
+  }
+
+  const isFreshAsset = /\.(?:html|js|css)$/i.test(requestUrl.pathname) || event.request.mode === "navigate";
+  if (isFreshAsset) {
+    event.respondWith(
+      fetch(event.request).then((networkResponse) => {
+        const cloned = networkResponse.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, cloned));
+        return networkResponse;
+      }).catch(async () => {
+        const cachedResponse = await caches.match(event.request);
+        return cachedResponse || caches.match("./index.html");
+      })
+    );
     return;
   }
 

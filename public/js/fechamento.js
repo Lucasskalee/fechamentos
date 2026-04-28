@@ -1,4 +1,4 @@
-import { SECTOR_OPTIONS, brl, escapeHtml, formatDate, num, sortLabels } from "./services/classificacao.js";
+import { SECTOR_OPTIONS, brl, escapeHtml, formatDate, num, sortLabels } from "./services/classificacao.js?v=20260428-2";
 import {
   MONTHS,
   STATUS_META,
@@ -10,7 +10,7 @@ import {
   invalidateCellCache,
   saveEntryAudit,
   saveNoteAudit
-} from "./services/fechamento.js";
+} from "./services/fechamento.js?v=20260428-2";
 
 const refs = {
   storeFilter: document.getElementById("storeFilter"),
