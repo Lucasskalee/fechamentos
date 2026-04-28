@@ -197,6 +197,70 @@ export async function fetchNoteItems(noteKey) {
   return items;
 }
 
+function applyManagerialFilters(query, filters = {}) {
+  let nextQuery = query;
+  if (filters.store && filters.store !== "TODAS") nextQuery = nextQuery.eq("store", filters.store);
+  if (filters.sector && filters.sector !== "TODOS") nextQuery = nextQuery.eq("sector", filters.sector);
+  if (filters.product && filters.product !== "TODOS") nextQuery = nextQuery.eq("product", filters.product);
+  if (filters.type && filters.type !== "TODOS") nextQuery = nextQuery.eq("type", filters.type);
+  if (filters.reason && filters.reason !== "TODOS") {
+    nextQuery = filters.reason === "Sem motivo" ? nextQuery.eq("reason", "") : nextQuery.eq("reason", filters.reason);
+  }
+  return nextQuery;
+}
+
+export async function fetchManagerialItems(filters = {}) {
+  const client = getSupabaseClient();
+  const year = Number(filters.year || new Date().getFullYear());
+  const fromDate = `${year - 1}-01-01T00:00:00.000Z`;
+  const toDate = `${year + 1}-01-01T00:00:00.000Z`;
+  const rows = [];
+  let from = 0;
+
+  while (true) {
+    const to = from + SUPABASE_PAGE_SIZE - 1;
+    const { data, error } = await applyManagerialFilters(
+      client
+        .from("loss_items")
+        .select("id, note_key, invoice, store, emission_date, emission_month, competence_month, operation, type, display_type, sector, product, quantity, unit_value, value, reason")
+        .gte("emission_date", fromDate)
+        .lt("emission_date", toDate),
+      filters
+    )
+      .order("emission_date", { ascending: true })
+      .range(from, to);
+
+    if (error) {
+      error.userMessage = "Nao foi possivel carregar a analise gerencial.";
+      throw error;
+    }
+
+    const pageRows = data || [];
+    rows.push(...pageRows);
+    if (pageRows.length < SUPABASE_PAGE_SIZE) break;
+    from += SUPABASE_PAGE_SIZE;
+  }
+
+  return rows.map((row) => ({
+    id: row.id,
+    noteKey: row.note_key,
+    invoice: row.invoice || "-",
+    store: row.store || "Loja nao identificada",
+    date: row.emission_date || "",
+    emissionMonth: row.emission_month || "",
+    competenceMonth: row.competence_month || "",
+    operation: row.operation || "",
+    type: row.type || "Outros",
+    displayType: row.display_type || row.type || "Outros",
+    sector: row.sector || "Nao classificado",
+    product: row.product || "Produto",
+    quantity: Number(row.quantity || 0),
+    unitValue: Number(row.unit_value || 0),
+    value: Number(row.value || 0),
+    reason: row.reason || ""
+  }));
+}
+
 export async function saveEntryAudit({ cell, status, observation = "" }) {
   const client = getSupabaseClient();
   const payload = {

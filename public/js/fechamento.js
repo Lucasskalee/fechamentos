@@ -5,6 +5,7 @@ import {
   clearFechamentoCache,
   fetchCellNotes,
   fetchGrid,
+  fetchManagerialItems,
   fetchNoteItems,
   invalidateCellCache,
   saveEntryAudit,
@@ -34,7 +35,37 @@ const refs = {
   connectionBadge: document.getElementById("connectionBadge"),
   lastSyncLabel: document.getElementById("lastSyncLabel"),
   currentTime: document.getElementById("currentTime"),
-  metaYear: document.getElementById("metaYear")
+  metaYear: document.getElementById("metaYear"),
+  managerRefreshBtn: document.getElementById("managerRefreshBtn"),
+  managerMonthFilter: document.getElementById("managerMonthFilter"),
+  managerYearFilter: document.getElementById("managerYearFilter"),
+  managerStoreFilter: document.getElementById("managerStoreFilter"),
+  managerSectorFilter: document.getElementById("managerSectorFilter"),
+  managerProductFilter: document.getElementById("managerProductFilter"),
+  managerTypeFilter: document.getElementById("managerTypeFilter"),
+  managerReasonFilter: document.getElementById("managerReasonFilter"),
+  managerStatus: document.getElementById("managerStatus"),
+  managerCards: document.getElementById("managerCards"),
+  storeComparisonChart: document.getElementById("storeComparisonChart"),
+  monthlyEvolutionChart: document.getElementById("monthlyEvolutionChart"),
+  reasonChart: document.getElementById("reasonChart"),
+  storeComparisonList: document.getElementById("storeComparisonList"),
+  managerDiagnosis: document.getElementById("managerDiagnosis"),
+  increaseProducts: document.getElementById("increaseProducts"),
+  decreaseProducts: document.getElementById("decreaseProducts"),
+  managerRankingBody: document.getElementById("managerRankingBody"),
+  priceQuantityTitle: document.getElementById("priceQuantityTitle"),
+  priceQuantityAnalysis: document.getElementById("priceQuantityAnalysis"),
+  reasonBreakdown: document.getElementById("reasonBreakdown"),
+  decisionForm: document.getElementById("decisionForm"),
+  decisionText: document.getElementById("decisionText"),
+  decisionOwner: document.getElementById("decisionOwner"),
+  decisionDueDate: document.getElementById("decisionDueDate"),
+  decisionStatus: document.getElementById("decisionStatus"),
+  decisionObservation: document.getElementById("decisionObservation"),
+  decisionDate: document.getElementById("decisionDate"),
+  decisionClearBtn: document.getElementById("decisionClearBtn"),
+  decisionSaved: document.getElementById("decisionSaved")
 };
 
 const state = {
@@ -62,6 +93,29 @@ const state = {
   itemsError: "",
   savingCell: false,
   savingNote: false,
+  manager: {
+    items: [],
+    rows: [],
+    selectedKey: "",
+    loading: false,
+    error: "",
+    filters: {
+      month: "TODOS",
+      year: new Date().getFullYear(),
+      store: "TODAS",
+      sector: "TODOS",
+      product: "TODOS",
+      type: "TODOS",
+      reason: "TODOS"
+    },
+    currentMonth: null,
+    previousMonth: null,
+    charts: {
+      stores: null,
+      evolution: null,
+      reasons: null
+    }
+  },
   toastTimer: null
 };
 
@@ -348,6 +402,429 @@ function renderGrid() {
   `;
 
   refs.gridTable.innerHTML = `${head}${body}${footer}`;
+}
+
+function setManagerStatus(type, message) {
+  if (!refs.managerStatus) return;
+  refs.managerStatus.className = `status ${type}`;
+  refs.managerStatus.textContent = message;
+}
+
+function monthDateKey(item) {
+  const date = new Date(item.date || "");
+  if (Number.isNaN(date.getTime())) return null;
+  return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1 };
+}
+
+function monthLabel(year, month) {
+  const meta = monthMeta(month);
+  return `${meta.shortLabel}/${year}`;
+}
+
+function previousPeriod(year, month) {
+  return month === 1 ? { year: year - 1, month: 12 } : { year, month: month - 1 };
+}
+
+function isSamePeriod(item, period) {
+  const key = monthDateKey(item);
+  return key && key.year === period.year && key.month === period.month;
+}
+
+function isRealLoss(item) {
+  return item.type === "Perdas";
+}
+
+function percentChange(current, previous) {
+  if (!previous) return current ? 100 : 0;
+  return ((current - previous) / previous) * 100;
+}
+
+function averagePrice(value, quantity) {
+  return quantity ? value / quantity : 0;
+}
+
+function groupSum(items, keyFn) {
+  const map = new Map();
+  items.forEach((item) => {
+    const key = keyFn(item);
+    const entry = map.get(key) || { value: 0, quantity: 0, items: 0, notes: new Set(), reasons: new Map() };
+    entry.value += Number(item.value || 0);
+    entry.quantity += Number(item.quantity || 0);
+    entry.items += 1;
+    if (item.noteKey) entry.notes.add(item.noteKey);
+    const reason = item.reason || "Sem motivo";
+    const reasonEntry = entry.reasons.get(reason) || { value: 0, quantity: 0, items: 0 };
+    reasonEntry.value += Number(item.value || 0);
+    reasonEntry.quantity += Number(item.quantity || 0);
+    reasonEntry.items += 1;
+    entry.reasons.set(reason, reasonEntry);
+    map.set(key, entry);
+  });
+  return map;
+}
+
+function topReasonLabel(reasonMap) {
+  const top = [...reasonMap.entries()].sort((a, b) => b[1].value - a[1].value)[0];
+  return top?.[0] || "Sem motivo";
+}
+
+function buildManagerModel() {
+  const manager = state.manager;
+  const year = Number(manager.filters.year || new Date().getFullYear());
+  const monthsInYear = manager.items
+    .map(monthDateKey)
+    .filter((key) => key && key.year === year)
+    .map((key) => key.month);
+  const currentMonth = manager.filters.month !== "TODOS"
+    ? Number(manager.filters.month)
+    : (monthsInYear.length ? Math.max(...monthsInYear) : new Date().getMonth() + 1);
+  const currentPeriod = { year, month: currentMonth };
+  const previous = previousPeriod(year, currentMonth);
+  const selectedTypeIsUsage = manager.filters.type === "Uso/Consumo";
+  const lossItems = manager.items.filter(isRealLoss);
+  const currentItems = selectedTypeIsUsage ? [] : lossItems.filter((item) => isSamePeriod(item, currentPeriod));
+  const previousItems = selectedTypeIsUsage ? [] : lossItems.filter((item) => isSamePeriod(item, previous));
+  const currentMap = groupSum(currentItems, (item) => `${item.product}||${item.store}||${item.sector}`);
+  const previousMap = groupSum(previousItems, (item) => `${item.product}||${item.store}||${item.sector}`);
+  const keys = new Set([...currentMap.keys(), ...previousMap.keys()]);
+
+  const rows = [...keys].map((key) => {
+    const [product, store, sector] = key.split("||");
+    const current = currentMap.get(key) || { value: 0, quantity: 0, items: 0, notes: new Set(), reasons: new Map() };
+    const previousEntry = previousMap.get(key) || { value: 0, quantity: 0, items: 0, notes: new Set(), reasons: new Map() };
+    const currentPrice = averagePrice(current.value, current.quantity);
+    const previousPrice = averagePrice(previousEntry.value, previousEntry.quantity);
+    const valueVariation = current.value - previousEntry.value;
+    const pctVariation = percentChange(current.value, previousEntry.value);
+    const quantityImpact = (current.quantity - previousEntry.quantity) * previousPrice;
+    const priceImpact = (currentPrice - previousPrice) * current.quantity;
+
+    return {
+      key,
+      product,
+      store,
+      sector,
+      currentValue: current.value,
+      previousValue: previousEntry.value,
+      valueVariation,
+      pctVariation,
+      currentQuantity: current.quantity,
+      previousQuantity: previousEntry.quantity,
+      currentPrice,
+      previousPrice,
+      mainReason: topReasonLabel(current.reasons.size ? current.reasons : previousEntry.reasons),
+      status: valueVariation > 1 ? "aumentou" : (valueVariation < -1 ? "reduziu" : "estavel"),
+      quantityVariation: current.quantity - previousEntry.quantity,
+      priceVariation: currentPrice - previousPrice,
+      quantityImpact,
+      priceImpact,
+      totalVariation: valueVariation,
+      reasons: current.reasons,
+      missingReasonValue: current.reasons.get("Sem motivo")?.value || 0
+    };
+  }).sort((a, b) => b.currentValue - a.currentValue || b.valueVariation - a.valueVariation);
+
+  const currentTotal = currentItems.reduce((sum, item) => sum + item.value, 0);
+  const previousTotal = previousItems.reduce((sum, item) => sum + item.value, 0);
+  const storeMap = groupSum(currentItems, (item) => item.store);
+  const sectorMap = groupSum(currentItems, (item) => item.sector);
+  const productMap = groupSum(currentItems, (item) => item.product);
+  const monthMap = groupSum(lossItems.filter((item) => {
+    const key = monthDateKey(item);
+    return key && key.year === year;
+  }), (item) => monthDateKey(item).month);
+
+  const stores = [...storeMap.entries()].map(([store, data]) => ({ store, ...data })).sort((a, b) => b.value - a.value);
+  const sectors = [...sectorMap.entries()].map(([sector, data]) => ({ sector, ...data })).sort((a, b) => b.value - a.value);
+  const products = [...productMap.entries()].map(([product, data]) => ({ product, ...data })).sort((a, b) => b.value - a.value);
+  const avgStore = stores.length ? currentTotal / stores.length : 0;
+  const topStore = stores[0] || null;
+  const topSector = sectors[0] || null;
+  const topIncrease = rows.filter((row) => row.valueVariation > 0).sort((a, b) => b.pctVariation - a.pctVariation || b.valueVariation - a.valueVariation).slice(0, 5);
+  const topDecrease = rows.filter((row) => row.valueVariation < 0).sort((a, b) => a.pctVariation - b.pctVariation || a.valueVariation - b.valueVariation).slice(0, 5);
+  const selected = rows.find((row) => row.key === manager.selectedKey) || rows[0] || null;
+
+  manager.currentMonth = currentPeriod;
+  manager.previousMonth = previous;
+  manager.rows = rows;
+  if (selected) manager.selectedKey = selected.key;
+
+  return {
+    currentPeriod,
+    previousPeriod: previous,
+    currentItems,
+    previousItems,
+    currentTotal,
+    previousTotal,
+    totalVariation: currentTotal - previousTotal,
+    pctVariation: percentChange(currentTotal, previousTotal),
+    stores,
+    sectors,
+    products,
+    avgStore,
+    topStore,
+    topSector,
+    topIncrease,
+    topDecrease,
+    selected,
+    monthMap,
+    selectedTypeIsUsage
+  };
+}
+
+function renderManagerCards(model) {
+  const criticalStore = model.stores.find((store) => model.stores.length > 1 && store.value > ((model.currentTotal - store.value) / (model.stores.length - 1))) || model.topStore;
+  const topIncrease = model.topIncrease[0];
+  const topDecrease = model.topDecrease[0];
+  refs.managerCards.innerHTML = `
+    <article class="card kpi-card">
+      <div class="label">Perda total</div>
+      <div class="value">${brl(model.currentTotal)}</div>
+      <div class="meta">Somente movimentos classificados como Perdas.</div>
+    </article>
+    <article class="card kpi-card ${Math.abs(model.pctVariation) > 15 ? "manager-alert-card" : ""}">
+      <div class="label">Variacao %</div>
+      <div class="value">${num(model.pctVariation)}%</div>
+      <div class="meta">${brl(model.totalVariation)} contra ${monthLabel(model.previousPeriod.year, model.previousPeriod.month)}.</div>
+    </article>
+    <article class="card kpi-card">
+      <div class="label">Loja mais critica</div>
+      <div class="value">${escapeHtml(criticalStore?.store || "-")}</div>
+      <div class="meta">${criticalStore ? brl(criticalStore.value) : "Sem perda real no recorte."}</div>
+    </article>
+    <article class="card kpi-card">
+      <div class="label">Setor mais critico</div>
+      <div class="value">${escapeHtml(model.topSector?.sector || "-")}</div>
+      <div class="meta">${model.topSector ? brl(model.topSector.value) : "Sem perda real no recorte."}</div>
+    </article>
+    <article class="card kpi-card ${topIncrease && topIncrease.pctVariation > 15 ? "manager-alert-card" : ""}">
+      <div class="label">Produto que mais aumentou</div>
+      <div class="value">${escapeHtml(topIncrease?.product || "-")}</div>
+      <div class="meta">${topIncrease ? `${brl(topIncrease.valueVariation)} | ${num(topIncrease.pctVariation)}%` : "Sem aumento relevante."}</div>
+    </article>
+    <article class="card kpi-card">
+      <div class="label">Produto que mais reduziu</div>
+      <div class="value">${escapeHtml(topDecrease?.product || "-")}</div>
+      <div class="meta">${topDecrease ? `${brl(topDecrease.valueVariation)} | ${num(topDecrease.pctVariation)}%` : "Sem reducao no recorte."}</div>
+    </article>
+  `;
+}
+
+function chartOptions() {
+  const styles = getComputedStyle(document.documentElement);
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: { legend: { labels: { color: styles.getPropertyValue("--text-soft") } } },
+    scales: {
+      x: { ticks: { color: styles.getPropertyValue("--text-soft") }, grid: { color: "rgba(148,163,184,.18)" } },
+      y: { ticks: { color: styles.getPropertyValue("--text-soft") }, grid: { color: "rgba(148,163,184,.18)" } }
+    }
+  };
+}
+
+function renderManagerCharts(model) {
+  if (!window.Chart) return;
+  Object.values(state.manager.charts).forEach((chart) => chart?.destroy());
+  state.manager.charts = { stores: null, evolution: null, reasons: null };
+  const styles = getComputedStyle(document.documentElement);
+  const accent = styles.getPropertyValue("--accent").trim() || "#0f5bd4";
+  const accent2 = styles.getPropertyValue("--accent-2").trim() || "#18a0b7";
+  const warning = styles.getPropertyValue("--warning").trim() || "#b97008";
+  const danger = styles.getPropertyValue("--danger").trim() || "#c2413a";
+  const options = chartOptions();
+
+  state.manager.charts.stores = new window.Chart(refs.storeComparisonChart, {
+    type: "bar",
+    data: {
+      labels: model.stores.map((entry) => entry.store),
+      datasets: [{
+        label: "Perda real",
+        data: model.stores.map((entry) => entry.value),
+        backgroundColor: model.stores.map((entry) => entry.value > model.avgStore ? danger : accent),
+        borderRadius: 8
+      }]
+    },
+    options
+  });
+
+  const monthLabels = MONTHS.map((month) => month.shortLabel);
+  state.manager.charts.evolution = new window.Chart(refs.monthlyEvolutionChart, {
+    type: "line",
+    data: {
+      labels: monthLabels,
+      datasets: [{
+        label: "Perda mensal",
+        data: MONTHS.map((month) => model.monthMap.get(month.number)?.value || 0),
+        borderColor: accent,
+        backgroundColor: "rgba(15,91,212,.14)",
+        fill: true,
+        tension: .32
+      }]
+    },
+    options
+  });
+
+  const selectedReasons = model.selected ? [...model.selected.reasons.entries()].sort((a, b) => b[1].value - a[1].value) : [];
+  state.manager.charts.reasons = new window.Chart(refs.reasonChart, {
+    type: "bar",
+    data: {
+      labels: selectedReasons.map(([reason]) => reason),
+      datasets: [{
+        label: "Motivos",
+        data: selectedReasons.map(([, data]) => data.value),
+        backgroundColor: selectedReasons.map(([reason]) => reason === "Sem motivo" ? warning : accent2),
+        borderRadius: 8
+      }]
+    },
+    options
+  });
+}
+
+function renderStoreComparison(model) {
+  const total = model.currentTotal || 1;
+  refs.storeComparisonList.innerHTML = model.stores.map((entry) => {
+    const othersAverage = model.stores.length > 1 ? (model.currentTotal - entry.value) / (model.stores.length - 1) : model.avgStore;
+    const aboveAverage = model.stores.length > 1 && entry.value > othersAverage;
+    return `
+      <div class="reason-chip ${aboveAverage ? "manager-warning-row" : ""}">
+        <div>
+          <strong>${escapeHtml(entry.store)}</strong>
+          <div class="hint">${num((entry.value / total) * 100)}% do total do setor</div>
+        </div>
+        <div class="cell-stack">
+          ${aboveAverage ? '<span class="status-badge warning">Acima da media</span>' : '<span class="status-badge success">Dentro da media</span>'}
+          <strong>${brl(entry.value)}</strong>
+        </div>
+      </div>
+    `;
+  }).join("") || '<div class="empty">Nenhuma perda real encontrada para comparar lojas.</div>';
+}
+
+function renderProductList(element, rows, emptyText) {
+  element.innerHTML = rows.map((row) => `
+    <button type="button" class="manager-product-card ${state.manager.selectedKey === row.key ? "is-active" : ""} ${Math.abs(row.pctVariation) > 15 ? "is-alert" : ""}" data-action="select-manager-product" data-key="${escapeHtml(row.key)}">
+      <div>
+        <strong>${escapeHtml(row.product)}</strong>
+        <span>${escapeHtml(row.store)} - ${escapeHtml(row.sector)}</span>
+      </div>
+      <div class="cell-stack">
+        <span class="status-badge ${row.status === "aumentou" ? "danger" : "success"}">${escapeHtml(row.status)}</span>
+        <strong>${brl(row.valueVariation)}</strong>
+        <span>${num(row.pctVariation)}%</span>
+      </div>
+    </button>
+  `).join("") || `<div class="empty">${escapeHtml(emptyText)}</div>`;
+}
+
+function renderManagerRanking() {
+  refs.managerRankingBody.innerHTML = state.manager.rows.slice(0, 80).map((row) => `
+    <tr class="${state.manager.selectedKey === row.key ? "manager-selected-row" : ""}" data-action="select-manager-product" data-key="${escapeHtml(row.key)}">
+      <td><button type="button" class="manager-row-button" data-action="select-manager-product" data-key="${escapeHtml(row.key)}">${escapeHtml(row.product)}</button></td>
+      <td>${escapeHtml(row.store)}</td>
+      <td>${escapeHtml(row.sector)}</td>
+      <td>${brl(row.currentValue)}</td>
+      <td>${brl(row.previousValue)}</td>
+      <td>${brl(row.valueVariation)}</td>
+      <td class="${Math.abs(row.pctVariation) > 15 ? "manager-alert-text" : ""}">${num(row.pctVariation)}%</td>
+      <td>${num(row.currentQuantity)}</td>
+      <td>${num(row.previousQuantity)}</td>
+      <td>${brl(row.currentPrice)}</td>
+      <td>${brl(row.previousPrice)}</td>
+      <td>${escapeHtml(row.mainReason)}</td>
+      <td><span class="status-badge ${row.status === "aumentou" ? "danger" : (row.status === "reduziu" ? "success" : "neutral")}">${escapeHtml(row.status)}</span></td>
+    </tr>
+  `).join("") || '<tr><td colspan="13">Nenhum produto com perda real no recorte atual.</td></tr>';
+}
+
+function renderPriceQuantity(model) {
+  const row = model.selected;
+  refs.priceQuantityTitle.textContent = row ? `${row.product} - ${row.store}` : "Produto selecionado";
+  if (!row) {
+    refs.priceQuantityAnalysis.innerHTML = '<div class="empty">Selecione um produto no ranking para analisar quantidade, preco medio e impacto financeiro.</div>';
+    return;
+  }
+
+  const dominant = Math.abs(row.priceImpact) > Math.abs(row.quantityImpact)
+    ? "aumento do preco medio"
+    : (Math.abs(row.quantityImpact) > 0 ? "maior quantidade perdida" : "variacao estavel");
+  refs.priceQuantityAnalysis.innerHTML = `
+    <div class="summary-card"><div class="label">Variacao de quantidade</div><strong>${num(row.quantityVariation)}</strong><div class="hint">${dominant === "maior quantidade perdida" ? "Principal vetor" : "Impacto operacional"}</div></div>
+    <div class="summary-card"><div class="label">Variacao do preco medio</div><strong>${brl(row.priceVariation)}</strong><div class="hint">${dominant === "aumento do preco medio" ? "Principal vetor" : "Impacto de custo"}</div></div>
+    <div class="summary-card"><div class="label">Variacao total</div><strong>${brl(row.totalVariation)}</strong><div class="hint">${num(row.pctVariation)}% contra mes anterior</div></div>
+    <div class="summary-card"><div class="label">Impacto por quantidade</div><strong>${brl(row.quantityImpact)}</strong><div class="hint">(qtd atual - qtd anterior) x preco anterior</div></div>
+    <div class="summary-card"><div class="label">Impacto por preco</div><strong>${brl(row.priceImpact)}</strong><div class="hint">(preco atual - preco anterior) x qtd atual</div></div>
+    <div class="summary-card ${row.missingReasonValue > 0 ? "manager-alert-card" : ""}"><div class="label">Falta de justificativa</div><strong>${brl(row.missingReasonValue)}</strong><div class="hint">${row.missingReasonValue > 0 ? "Ha itens sem motivo" : "Motivos preenchidos"}</div></div>
+  `;
+}
+
+function renderReasonBreakdown(model) {
+  const row = model.selected;
+  if (!row) {
+    refs.reasonBreakdown.innerHTML = '<div class="empty">Nenhum produto selecionado.</div>';
+    return;
+  }
+  const total = row.currentValue || 1;
+  refs.reasonBreakdown.innerHTML = [...row.reasons.entries()].sort((a, b) => b[1].value - a[1].value).map(([reason, data]) => `
+    <div class="reason-chip ${reason === "Sem motivo" ? "manager-warning-row" : ""}">
+      <div>
+        <strong>${escapeHtml(reason)}</strong>
+        <div class="hint">${data.items} item(ns) - ${num((data.value / total) * 100)}%</div>
+      </div>
+      <div class="cell-stack">
+        ${reason === "Sem motivo" ? '<span class="status-badge warning">Sem justificativa</span>' : '<span class="status-badge success">Justificado</span>'}
+        <strong>${brl(data.value)}</strong>
+      </div>
+    </div>
+  `).join("") || '<div class="empty">Sem motivos vinculados ao produto selecionado.</div>';
+}
+
+function renderDiagnosis(model) {
+  if (!model.currentItems.length) {
+    refs.managerDiagnosis.innerHTML = '<strong>Diagnostico automatico</strong><p>Nao ha perda real no recorte gerencial selecionado. Uso e consumo nao foi misturado aos indicadores de perda.</p>';
+    return;
+  }
+  const store = model.stores.find((entry) => model.stores.length > 1 && entry.value > ((model.currentTotal - entry.value) / (model.stores.length - 1))) || model.topStore;
+  const productNames = model.topIncrease.slice(0, 2).map((row) => row.product).join(" e ") || model.products.slice(0, 2).map((entry) => entry.product).join(" e ");
+  const selected = model.selected;
+  const mainDriver = selected && Math.abs(selected.priceImpact) > Math.abs(selected.quantityImpact)
+    ? "variacao de preco medio"
+    : "quantidade perdida";
+  const reason = selected?.mainReason || "sem motivo";
+  const sector = state.manager.filters.sector !== "TODOS" ? state.manager.filters.sector : (model.topSector?.sector || "setor selecionado");
+  refs.managerDiagnosis.innerHTML = `
+    <strong>Diagnostico automatico</strong>
+    <p>A ${escapeHtml(store?.store || "loja principal")} apresenta perda no setor ${escapeHtml(sector)} ${store && store.value > model.avgStore ? "acima da media das lojas" : "como maior impacto do recorte"}. Os principais produtos responsaveis foram ${escapeHtml(productNames || "sem destaque")}. A variacao ocorreu principalmente por ${escapeHtml(mainDriver)}. O principal motivo informado foi ${escapeHtml(reason)}.</p>
+  `;
+}
+
+function renderManager() {
+  if (state.manager.loading && !state.manager.items.length) {
+    setManagerStatus("info", "Carregando dados gerenciais...");
+    refs.managerCards.innerHTML = "";
+    refs.managerRankingBody.innerHTML = '<tr><td colspan="13">Carregando analise...</td></tr>';
+    return;
+  }
+
+  if (state.manager.error) {
+    setManagerStatus("error", state.manager.error);
+    return;
+  }
+
+  const model = buildManagerModel();
+  setManagerStatus(model.selectedTypeIsUsage ? "warning" : "success", model.selectedTypeIsUsage
+    ? "Uso/Consumo selecionado. Os indicadores de perda real ficam zerados para evitar mistura de natureza operacional."
+    : `${model.currentItems.length} item(ns) de perda real em ${monthLabel(model.currentPeriod.year, model.currentPeriod.month)}.`);
+  renderManagerCards(model);
+  renderStoreComparison(model);
+  renderProductList(refs.increaseProducts, model.topIncrease, "Nenhum produto aumentou a perda contra o mes anterior.");
+  renderProductList(refs.decreaseProducts, model.topDecrease, "Nenhum produto reduziu a perda contra o mes anterior.");
+  renderManagerRanking();
+  renderPriceQuantity(model);
+  renderReasonBreakdown(model);
+  renderDiagnosis(model);
+  renderManagerCharts(model);
+  renderSavedDecision();
 }
 
 function renderNotesList() {
@@ -783,6 +1260,130 @@ function syncFiltersFromData() {
   refs.metaYear.textContent = String(state.filters.year);
 }
 
+function syncManagerFiltersFromData() {
+  if (!refs.managerYearFilter) return;
+  const stores = sortLabels(new Set([
+    ...state.allRows.map((row) => row.store).filter(Boolean),
+    ...state.manager.items.map((item) => item.store).filter(Boolean)
+  ]));
+  const sectors = sortLabels(new Set([
+    ...SECTOR_OPTIONS,
+    ...state.manager.items.map((item) => item.sector).filter(Boolean)
+  ]));
+  const products = sortLabels(new Set(state.manager.items.map((item) => item.product).filter(Boolean))).slice(0, 600);
+  const types = sortLabels(new Set([
+    ...state.allRows.map((row) => row.type).filter(Boolean),
+    ...state.manager.items.map((item) => item.type).filter(Boolean)
+  ]));
+  const reasons = sortLabels(new Set(state.manager.items.map((item) => item.reason || "Sem motivo")));
+  const years = buildYearOptions([
+    ...state.allRows,
+    ...state.manager.items.map((item) => ({ year: monthDateKey(item)?.year || state.manager.filters.year }))
+  ]);
+  const monthOptions = ["TODOS", ...MONTHS.map((month) => String(month.number))];
+
+  fillSelect(refs.managerMonthFilter, monthOptions, state.manager.filters.month, (value) => value === "TODOS" ? "Mes mais recente" : monthMeta(value).longLabel);
+  fillSelect(refs.managerYearFilter, years, state.manager.filters.year);
+  fillSelect(refs.managerStoreFilter, ["TODAS", ...stores], state.manager.filters.store, (value) => value === "TODAS" ? "Todas as lojas" : value);
+  fillSelect(refs.managerSectorFilter, ["TODOS", ...sectors], state.manager.filters.sector, (value) => value === "TODOS" ? "Todos os setores" : value);
+  fillSelect(refs.managerProductFilter, ["TODOS", ...products], state.manager.filters.product, (value) => value === "TODOS" ? "Todos os produtos" : value);
+  fillSelect(refs.managerTypeFilter, ["TODOS", ...types], state.manager.filters.type, (value) => value === "TODOS" ? "Todos os tipos" : value);
+  fillSelect(refs.managerReasonFilter, ["TODOS", ...reasons], state.manager.filters.reason, (value) => value === "TODOS" ? "Todos os motivos" : value);
+}
+
+function syncManagerStateFromFilters() {
+  state.manager.filters = {
+    month: refs.managerMonthFilter.value,
+    year: Number(refs.managerYearFilter.value || state.filters.year || new Date().getFullYear()),
+    store: refs.managerStoreFilter.value,
+    sector: refs.managerSectorFilter.value,
+    product: refs.managerProductFilter.value,
+    type: refs.managerTypeFilter.value,
+    reason: refs.managerReasonFilter.value
+  };
+}
+
+async function loadManagerData({ silent = false } = {}) {
+  if (!refs.managerStatus) return;
+  try {
+    state.manager.loading = true;
+    state.manager.error = "";
+    if (!silent) renderManager();
+    state.manager.items = await fetchManagerialItems(state.manager.filters);
+    state.manager.selectedKey = "";
+    syncManagerFiltersFromData();
+  } catch (error) {
+    console.error(error);
+    state.manager.error = error.userMessage || error.message || "Falha ao carregar a analise gerencial.";
+  } finally {
+    state.manager.loading = false;
+    renderManager();
+  }
+}
+
+function managerDecisionKey() {
+  const filters = state.manager.filters;
+  const product = state.manager.selectedKey || "geral";
+  return `gestao_perdas_decisao_v1::${filters.year}::${filters.month}::${filters.store}::${filters.sector}::${filters.type}::${product}`;
+}
+
+function readDecision() {
+  try {
+    return JSON.parse(localStorage.getItem(managerDecisionKey()) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function renderSavedDecision() {
+  if (!refs.decisionSaved) return;
+  const decision = readDecision();
+  if (!decision) {
+    refs.decisionSaved.innerHTML = '<div class="empty">Nenhuma decisao registrada para o recorte e produto selecionados.</div>';
+    return;
+  }
+  refs.decisionSaved.innerHTML = `
+    <div class="decision-card">
+      <div>
+        <span class="panel-tag">Ultima decisao</span>
+        <strong>${escapeHtml(decision.text || "Decisao sem descricao")}</strong>
+        <p>${escapeHtml(decision.observation || "Sem observacao adicional.")}</p>
+      </div>
+      <div class="decision-meta">
+        <span>Responsavel: ${escapeHtml(decision.owner || "-")}</span>
+        <span>Prazo: ${escapeHtml(decision.dueDate || "-")}</span>
+        <span>Data: ${escapeHtml(decision.date || "-")}</span>
+        <span class="status-badge info">${escapeHtml(decision.status || "Aberta")}</span>
+      </div>
+    </div>
+  `;
+}
+
+function fillDecisionForm(decision = {}) {
+  refs.decisionText.value = decision.text || "";
+  refs.decisionOwner.value = decision.owner || "";
+  refs.decisionDueDate.value = decision.dueDate || "";
+  refs.decisionStatus.value = decision.status || "Aberta";
+  refs.decisionObservation.value = decision.observation || "";
+  refs.decisionDate.value = decision.date || new Date().toISOString().slice(0, 10);
+}
+
+function saveDecision(event) {
+  event.preventDefault();
+  const decision = {
+    text: refs.decisionText.value.trim(),
+    owner: refs.decisionOwner.value.trim(),
+    dueDate: refs.decisionDueDate.value,
+    status: refs.decisionStatus.value,
+    observation: refs.decisionObservation.value.trim(),
+    date: refs.decisionDate.value || new Date().toISOString().slice(0, 10),
+    savedAt: new Date().toISOString()
+  };
+  localStorage.setItem(managerDecisionKey(), JSON.stringify(decision));
+  renderSavedDecision();
+  showToast("success", "Decisao gerencial salva para o recorte atual.");
+}
+
 function refreshClock() {
   refs.currentTime.textContent = new Date().toLocaleTimeString("pt-BR");
 }
@@ -854,6 +1455,44 @@ function bindEvents() {
       await saveNote();
     }
   });
+
+  [
+    refs.managerMonthFilter,
+    refs.managerYearFilter,
+    refs.managerStoreFilter,
+    refs.managerSectorFilter,
+    refs.managerProductFilter,
+    refs.managerTypeFilter,
+    refs.managerReasonFilter
+  ].filter(Boolean).forEach((element) => {
+    element.addEventListener("change", () => {
+      syncManagerStateFromFilters();
+      loadManagerData({ silent: true });
+    });
+  });
+
+  refs.managerRefreshBtn?.addEventListener("click", () => {
+    syncManagerStateFromFilters();
+    loadManagerData();
+  });
+
+  document.getElementById("analiseGerencial")?.addEventListener("click", (event) => {
+    const action = event.target.closest("[data-action]");
+    if (!action) return;
+    if (action.dataset.action === "select-manager-product") {
+      state.manager.selectedKey = action.dataset.key;
+      renderManager();
+      fillDecisionForm(readDecision() || {});
+    }
+  });
+
+  refs.decisionForm?.addEventListener("submit", saveDecision);
+  refs.decisionClearBtn?.addEventListener("click", () => {
+    fillDecisionForm({});
+    localStorage.removeItem(managerDecisionKey());
+    renderSavedDecision();
+    showToast("success", "Decisao removida do recorte atual.");
+  });
 }
 
 async function init() {
@@ -863,6 +1502,10 @@ async function init() {
   clearFechamentoCache();
   await loadGrid();
   syncFiltersFromData();
+  state.manager.filters.year = state.filters.year;
+  syncManagerFiltersFromData();
+  fillDecisionForm({});
+  await loadManagerData({ silent: true });
 }
 
 init().catch((error) => {
