@@ -51,6 +51,7 @@ create index if not exists idx_loss_items_note_key on public.loss_items(note_key
 create index if not exists idx_loss_items_access_key on public.loss_items(access_key);
 create unique index if not exists idx_loss_items_note_item on public.loss_items(note_key, item_index);
 create index if not exists idx_loss_items_filters on public.loss_items(store, type, sector, reason);
+create index if not exists idx_loss_items_reason_analysis on public.loss_items(competence_month, store, sector, reason, product);
 
 create or replace function public.set_updated_at()
 returns trigger

@@ -5,6 +5,38 @@ function renderEmpty(message) {
   return `<div class="empty">${message}</div>`;
 }
 
+const MONTH_KEYS = [
+  ["jan", "Janeiro"],
+  ["fev", "Fevereiro"],
+  ["mar", "Marco"],
+  ["abr", "Abril"],
+  ["mai", "Maio"],
+  ["jun", "Junho"],
+  ["jul", "Julho"],
+  ["ago", "Agosto"],
+  ["set", "Setembro"],
+  ["out", "Outubro"],
+  ["nov", "Novembro"],
+  ["dez", "Dezembro"]
+];
+
+function buildCompetenceMonthOptions(state, note) {
+  const years = new Set([String(new Date().getFullYear())]);
+  [...state.items, ...state.notes].forEach((entry) => {
+    [entry.competenceMonth, entry.emissionMonth].forEach((month) => {
+      const year = String(month || "").split("/")[1];
+      if (year) years.add(year);
+    });
+    const date = new Date(entry.date || "");
+    if (!Number.isNaN(date.getTime())) years.add(String(date.getFullYear()));
+  });
+  if (note?.competenceMonth) years.add(String(note.competenceMonth).split("/")[1]);
+  return [...years]
+    .filter(Boolean)
+    .sort((a, b) => Number(a) - Number(b))
+    .flatMap((year) => MONTH_KEYS.map(([key, label]) => ({ value: `${key}/${year}`, label: `${label}/${year}` })));
+}
+
 function getCssVar(name, fallback) {
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return value || fallback;
@@ -625,7 +657,8 @@ export function renderClassification(state, refs) {
     : pending
       ? `<div class="summary-alert warning"><strong>${pending} item(ns) pendente(s)</strong><span>${completion}% da nota classificada. Priorize essa nota antes de fechar o recorte.</span></div>`
       : '<div class="summary-alert success"><strong>Nota concluida</strong><span>Todos os itens desta nota ja estao classificados.</span></div>';
-  refs.noteSummary.innerHTML = `${summaryAlert}<div class="mini-item"><strong>Loja</strong><span>${escapeHtml(note.store)}</span></div><div class="mini-item"><strong>Nota</strong><span>${escapeHtml(note.invoice)}</span></div><div class="mini-item"><strong>Tipo</strong><span>${escapeHtml(note.displayType || note.type)}</span></div><div class="mini-item"><strong>Itens pendentes</strong><span>${pending}</span></div><div class="mini-item"><strong>Percentual classificado</strong><span>${completion}%</span></div><div class="mini-item editor"><strong>Setor</strong><div class="inline-edit"><select id="noteSectorEdit">${SECTOR_OPTIONS.map((sector) => `<option value="${escapeHtml(sector)}" ${note.sector === sector ? "selected" : ""}>${escapeHtml(sector)}</option>`).join("")}</select><button type="button" data-action="save-sector" data-note-key="${escapeHtml(note.key)}">Salvar setor</button></div><div class="hint">Use esse ajuste quando a nota vier sem setor identificado ou com setor incorreto.</div></div><div class="mini-item"><strong>Operacao</strong><span>${escapeHtml(note.operation || "-")}</span></div><div class="mini-item editor"><strong>Acoes</strong><div class="inline-edit"><button type="button" class="danger-btn" data-action="remove-note" data-note-key="${escapeHtml(note.key)}">Excluir esta nota</button></div><div class="hint">A exclusao remove a nota e todos os seus itens do banco e do dashboard.</div></div>`;
+  const monthOptions = buildCompetenceMonthOptions(state, note);
+  refs.noteSummary.innerHTML = `${summaryAlert}<div class="mini-item"><strong>Loja</strong><span>${escapeHtml(note.store)}</span></div><div class="mini-item"><strong>Nota</strong><span>${escapeHtml(note.invoice)}</span></div><div class="mini-item"><strong>Tipo</strong><span>${escapeHtml(note.displayType || note.type)}</span></div><div class="mini-item"><strong>Emissao</strong><span>${escapeHtml(formatDate(note.date))}</span></div><div class="mini-item"><strong>Competencia atual</strong><span>${escapeHtml(note.competenceMonth || "-")}</span></div><div class="mini-item"><strong>Itens pendentes</strong><span>${pending}</span></div><div class="mini-item"><strong>Percentual classificado</strong><span>${completion}%</span></div><div class="mini-item editor"><strong>Mes de competencia</strong><div class="inline-edit"><select id="noteCompetenceMonthEdit">${monthOptions.map((month) => `<option value="${escapeHtml(month.value)}" ${note.competenceMonth === month.value ? "selected" : ""}>${escapeHtml(month.label)}</option>`).join("")}</select><button type="button" data-action="save-competence-month" data-note-key="${escapeHtml(note.key)}">Salvar mes</button></div><div class="hint">Use quando a nota foi lancada em atraso e precisa entrar em outro mes do fechamento.</div></div><div class="mini-item editor"><strong>Setor</strong><div class="inline-edit"><select id="noteSectorEdit">${SECTOR_OPTIONS.map((sector) => `<option value="${escapeHtml(sector)}" ${note.sector === sector ? "selected" : ""}>${escapeHtml(sector)}</option>`).join("")}</select><button type="button" data-action="save-sector" data-note-key="${escapeHtml(note.key)}">Salvar setor</button></div><div class="hint">Use esse ajuste quando a nota vier sem setor identificado ou com setor incorreto.</div></div><div class="mini-item"><strong>Operacao</strong><span>${escapeHtml(note.operation || "-")}</span></div><div class="mini-item editor"><strong>Acoes</strong><div class="inline-edit"><button type="button" class="danger-btn" data-action="remove-note" data-note-key="${escapeHtml(note.key)}">Excluir esta nota</button></div><div class="hint">A exclusao remove a nota e todos os seus itens do banco e do dashboard.</div></div>`;
 }
 
 function buildReportHtml(state, refs) {

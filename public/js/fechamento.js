@@ -2,21 +2,26 @@ import { SECTOR_OPTIONS, brl, escapeHtml, formatDate, num, sortLabels } from "./
 import {
   MONTHS,
   STATUS_META,
+  classifyClosingType,
   clearFechamentoCache,
   fetchCellNotes,
   fetchGrid,
   fetchManagerialItems,
   fetchNoteItems,
   invalidateCellCache,
+  normalizeClosingSector,
   saveEntryAudit,
+  saveItemReason,
+  saveItemReasons,
   saveNoteAudit
-} from "./services/fechamento.js?v=20260428-2";
+} from "./services/fechamento.js?v=20260511-3";
 
 const refs = {
   storeFilter: document.getElementById("storeFilter"),
   yearFilter: document.getElementById("yearFilter"),
   typeFilter: document.getElementById("typeFilter"),
   statusFilter: document.getElementById("statusFilter"),
+  quickStoreFilter: document.getElementById("quickStoreFilter"),
   refreshBtn: document.getElementById("refreshBtn"),
   clearBtn: document.getElementById("clearBtn"),
   statusBanner: document.getElementById("statusBanner"),
@@ -70,7 +75,8 @@ const refs = {
 
 const state = {
   allRows: [],
-  grid: { rows: [], totalsByMonth: [], summary: defaultSummary() },
+  quickStores: [],
+  grid: { lojas: [], rows: [], totalsByMonth: [], summary: defaultSummary() },
   filters: {
     store: "TODAS",
     year: new Date().getFullYear(),
@@ -93,6 +99,8 @@ const state = {
   itemsError: "",
   savingCell: false,
   savingNote: false,
+  savingItems: false,
+  savingItemIds: new Set(),
   manager: {
     items: [],
     rows: [],
@@ -123,6 +131,7 @@ function defaultSummary() {
   return {
     totalValue: 0,
     noteCount: 0,
+    historicalCount: 0,
     pendingCount: 0,
     divergentCount: 0,
     checkedCount: 0
@@ -174,8 +183,24 @@ function buildBadge(status) {
   return `<span class="status-badge ${meta.tone}">${meta.label}</span>`;
 }
 
+function buildClassificationOptions(currentValue = "") {
+  return NOTE_CLASSIFICATION_OPTIONS.map((option) => `
+    <option value="${escapeHtml(option.value)}" ${currentValue === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>
+  `).join("");
+}
+
+function buildItemReasonOptions(currentValue = "", suggestedValue = "") {
+  const selectedValue = currentValue || suggestedValue || "";
+  return [
+    `<option value="" ${selectedValue ? "" : "selected"}>Selecionar motivo</option>`,
+    ...ITEM_REASON_OPTIONS.map((option) => `
+      <option value="${escapeHtml(option.value)}" ${selectedValue === option.value ? "selected" : ""}>${escapeHtml(option.label)}</option>
+    `)
+  ].join("");
+}
+
 function canPersistAudit(cell) {
-  return cell?.store && cell.store !== "TODAS" && cell.type && cell.type !== "TODOS";
+  return !cell?.isHistorical && cell?.store && cell.store !== "TODAS" && cell.type && cell.type !== "TODOS";
 }
 
 function deriveCellStatus(cell, notes) {
@@ -188,91 +213,215 @@ function deriveCellStatus(cell, notes) {
 
 function buildYearOptions(rows) {
   const years = new Set([String(new Date().getFullYear())]);
+  years.add("2025");
   rows.forEach((row) => years.add(String(row.year)));
   return sortLabels(years);
 }
 
-function buildGridModel(records) {
+const CLOSING_TABLES = [
+  {
+    key: "perdasSaidas",
+    title: "PERDAS / SA\u00cdDAS SETORES",
+    tone: "loss",
+    sectors: ["FLV", "A\u00e7ougue", "Padaria", "Produ\u00e7\u00e3o Padaria", "Frios e Congelados", "Pagas", "Furtos", "Bebidas", "Loja e Dep\u00f3sito", "Sa\u00edda de um para outro"]
+  },
+  {
+    key: "consumo",
+    title: "MATERIAL USO / CONSUMO SETOR",
+    tone: "usage",
+    sectors: ["A\u00e7ougue", "FLV", "Padaria", "Produ\u00e7\u00e3o", "Frente de Caixa", "Administrativo", "Fatia\u00e7\u00e3o", "Loja / Dep\u00f3sito"]
+  }
+];
+
+const NOTE_CLASSIFICATION_OPTIONS = [
+  { value: "", label: "Sem classificacao" },
+  { value: "Quebra", label: "Quebra" },
+  { value: "Uso e Consumo", label: "Uso e Consumo" },
+  { value: "Saída de um para outro", label: "Saída de um para outro" },
+  { value: "Vencimento", label: "Vencimento" },
+  { value: "Avaria", label: "Avaria" },
+  { value: "Erro de corte", label: "Erro de corte" },
+  { value: "Outros", label: "Outros" }
+];
+
+const ITEM_REASON_OPTIONS = NOTE_CLASSIFICATION_OPTIONS.filter((option) => option.value);
+
+function mergeStatus(previousStatus, currentStatus) {
+  const statuses = [previousStatus, currentStatus].filter(Boolean);
+  if (statuses.includes("divergente")) return "divergente";
+  if (statuses.length && statuses.every((status) => status === "confere")) return "confere";
+  if (statuses.includes("pendente")) return "pendente";
+  return statuses[0] || "sem_nota";
+}
+
+function positiveMonthAverage(values) {
+  const positives = values.map(Number).filter((value) => value > 0);
+  if (!positives.length) return 0;
+  return positives.reduce((sum, value) => sum + value, 0) / positives.length;
+}
+
+function buildEmptyCell({ store, year, month, typeGroup, sector }) {
+  return {
+    entryId: null,
+    store,
+    year: Number(year),
+    month: month.number,
+    monthLabel: month.longLabel,
+    type: "TODOS",
+    typeGroup,
+    sector,
+    status: "sem_nota",
+    observation: "",
+    totalValue: 0,
+    noteCount: 0,
+    isHistorical: false
+  };
+}
+
+function buildSectorRow({ store, year, typeGroup, sector, grouped }) {
+  const months = MONTHS.map((month) => grouped.get(`${store}::${typeGroup}::${sector}::${month.number}`) || buildEmptyCell({
+    store,
+    year,
+    month,
+    typeGroup,
+    sector
+  }));
+  const monthValues = months.map((cell) => Number(cell.totalValue || 0));
+  return {
+    sector,
+    months,
+    averageValue: positiveMonthAverage(monthValues),
+    totalValue: monthValues.reduce((sum, value) => sum + value, 0),
+    noteCount: months.reduce((sum, cell) => sum + Number(cell.noteCount || 0), 0)
+  };
+}
+
+function buildTableModel({ store, year, definition, grouped }) {
+  const availableSectors = [...grouped.keys()]
+    .map((key) => key.split("::"))
+    .filter(([rowStore, typeGroup]) => rowStore === store && typeGroup === definition.key)
+    .map((parts) => parts[2]);
+  const extraSectors = sortLabels(new Set(availableSectors.filter((sector) => !definition.sectors.includes(sector))));
+  const sectors = [...definition.sectors, ...extraSectors];
+  const rows = sectors.map((sector) => buildSectorRow({
+    store,
+    year,
+    typeGroup: definition.key,
+    sector,
+    grouped
+  }));
+  const totalsByMonth = MONTHS.map((month) => rows.reduce((sum, row) => sum + Number(row.months[month.number - 1].totalValue || 0), 0));
+  const noteCount = rows.reduce((sum, row) => sum + row.noteCount, 0);
+  return {
+    ...definition,
+    rows,
+    totalsByMonth,
+    totalValue: totalsByMonth.reduce((sum, value) => sum + value, 0),
+    averageValue: positiveMonthAverage(totalsByMonth),
+    noteCount
+  };
+}
+
+function buildStoreSummary(storeModel) {
+  const perdas = storeModel.tables.find((table) => table.key === "perdasSaidas");
+  const consumo = storeModel.tables.find((table) => table.key === "consumo");
+  const topLoss = [...(perdas?.rows || [])].sort((a, b) => b.totalValue - a.totalValue)[0];
+  const topUsage = [...(consumo?.rows || [])].sort((a, b) => b.totalValue - a.totalValue)[0];
+  return {
+    totalPerdas: perdas?.totalValue || 0,
+    totalConsumo: consumo?.totalValue || 0,
+    totalGeral: (perdas?.totalValue || 0) + (consumo?.totalValue || 0),
+    topLoss: topLoss?.totalValue > 0 ? topLoss : null,
+    topUsage: topUsage?.totalValue > 0 ? topUsage : null
+  };
+}
+
+function normalizeClosingRows(records) {
   const grouped = new Map();
+  const storeSet = new Set();
+  const year = Number(state.filters.year);
+
   records.forEach((row) => {
-    const key = `${row.sector}::${row.month_number}`;
+    const store = row.store || "Loja nao identificada";
+    const typeGroup = classifyClosingType(row.type || row.category || "");
+    const sector = normalizeClosingSector(row.sector || "", typeGroup);
+    const month = Number(row.month_number);
+    const key = `${store}::${typeGroup}::${sector}::${month}`;
+    const currentType = row.type || "Outros";
     const previous = grouped.get(key);
     const current = {
-      entryId: state.filters.store === "TODAS" || state.filters.type === "TODOS" ? null : (row.entry_id || null),
-      store: state.filters.store === "TODAS" ? "TODAS" : row.store,
-      year: Number(row.year),
-      month: Number(row.month_number),
-      monthLabel: row.month_label || monthMeta(row.month_number).longLabel,
-      type: state.filters.type === "TODOS" ? "TODOS" : row.type,
-      sector: row.sector,
+      entryId: state.filters.type === "TODOS" ? null : (row.entry_id || null),
+      store,
+      year: Number(row.year || year),
+      month,
+      monthLabel: row.month_label || monthMeta(month).longLabel,
+      type: currentType,
+      typeGroup,
+      sector,
       status: row.status || "pendente",
       observation: row.observation || "",
       totalValue: Number(row.total_value || 0),
-      noteCount: Number(row.note_count || 0)
+      noteCount: Number(row.note_count || 0),
+      isHistorical: Boolean(row.is_historical),
+      source: row.source || "",
+      detailLevel: row.detail_level || "",
+      sourceTypes: new Set([currentType])
     };
 
+    storeSet.add(store);
     if (!previous) {
       grouped.set(key, current);
       return;
     }
 
-    const statuses = [previous.status, current.status];
+    previous.sourceTypes.add(currentType);
     grouped.set(key, {
       ...previous,
+      entryId: previous.sourceTypes.size === 1 && state.filters.type !== "TODOS" ? previous.entryId : null,
+      type: previous.sourceTypes.size === 1 ? [...previous.sourceTypes][0] : "TODOS",
       totalValue: previous.totalValue + current.totalValue,
       noteCount: previous.noteCount + current.noteCount,
-      status: statuses.includes("divergente")
-        ? "divergente"
-        : (statuses.every((status) => status === "confere")
-          ? "confere"
-          : (statuses.includes("pendente") ? "pendente" : previous.status))
+      isHistorical: previous.isHistorical && current.isHistorical,
+      source: previous.source || current.source || "",
+      detailLevel: previous.detailLevel || current.detailLevel || "",
+      status: mergeStatus(previous.status, current.status),
+      observation: previous.observation || current.observation || ""
     });
   });
 
-  const sectors = sortLabels(new Set([
-    ...SECTOR_OPTIONS,
-    ...records.map((row) => row.sector).filter(Boolean)
-  ]));
-
-  const rows = sectors.map((sector) => {
-    const months = MONTHS.map((month) => grouped.get(`${sector}::${month.number}`) || {
-      entryId: null,
-      store: state.filters.store,
-      year: Number(state.filters.year),
-      month: month.number,
-      monthLabel: month.longLabel,
-      type: state.filters.type,
-      sector,
-      status: "sem_nota",
-      observation: "",
-      totalValue: 0,
-      noteCount: 0
-    });
-
-    return {
-      sector,
-      months,
-      totalValue: months.reduce((sum, cell) => sum + Number(cell.totalValue || 0), 0),
-      noteCount: months.reduce((sum, cell) => sum + Number(cell.noteCount || 0), 0)
-    };
+  const stores = sortLabels(storeSet);
+  const lojas = stores.map((store) => {
+    const tables = CLOSING_TABLES.map((definition) => buildTableModel({ store, year, definition, grouped }));
+    const model = { loja: store, tables };
+    return { ...model, summary: buildStoreSummary(model) };
   });
 
-  const summary = rows.reduce((acc, row) => {
-    row.months.forEach((cell) => {
-      acc.totalValue += cell.totalValue;
-      acc.noteCount += cell.noteCount;
-      if (cell.status === "pendente") acc.pendingCount += 1;
-      if (cell.status === "divergente") acc.divergentCount += 1;
-      if (cell.status === "confere") acc.checkedCount += 1;
+  return { lojas };
+}
+
+function buildGridModel(records) {
+  const normalized = normalizeClosingRows(records);
+  const summary = normalized.lojas.reduce((acc, loja) => {
+    loja.tables.forEach((table) => {
+      table.rows.forEach((row) => {
+        row.months.forEach((cell) => {
+          acc.totalValue += cell.totalValue;
+          acc.noteCount += cell.noteCount;
+          if (cell.isHistorical && cell.totalValue > 0) acc.historicalCount += 1;
+          if (cell.status === "pendente") acc.pendingCount += 1;
+          if (cell.status === "divergente") acc.divergentCount += 1;
+          if (cell.status === "confere") acc.checkedCount += 1;
+        });
+      });
     });
     return acc;
   }, defaultSummary());
-
-  const totalsByMonth = MONTHS.map((month) => rows.reduce((sum, row) => sum + Number(row.months[month.number - 1].totalValue || 0), 0));
-  return { rows, totalsByMonth, summary };
+  const totalsByMonth = MONTHS.map((month) => normalized.lojas.reduce((storeSum, loja) => storeSum + loja.tables.reduce((tableSum, table) => tableSum + Number(table.totalsByMonth[month.number - 1] || 0), 0), 0));
+  return { ...normalized, rows: [], totalsByMonth, summary };
 }
 
 function renderSummary() {
+  const isHistoricalGrid = state.grid.summary.historicalCount > 0 && state.grid.summary.noteCount === 0;
   refs.summaryCards.innerHTML = `
     <article class="card kpi-card">
       <div class="label">Total do periodo</div>
@@ -280,9 +429,9 @@ function renderSummary() {
       <div class="meta">Soma consolidada do recorte atual.</div>
     </article>
     <article class="card kpi-card">
-      <div class="label">Notas no periodo</div>
-      <div class="value">${state.grid.summary.noteCount}</div>
-      <div class="meta">Quantidade de notas presentes na grade.</div>
+      <div class="label">${isHistoricalGrid ? "Registros historicos" : "Notas no periodo"}</div>
+      <div class="value">${isHistoricalGrid ? state.grid.summary.historicalCount : state.grid.summary.noteCount}</div>
+      <div class="meta">${isHistoricalGrid ? "Celulas consolidadas importadas de planilha." : "Quantidade de notas presentes na grade."}</div>
     </article>
     <article class="card kpi-card">
       <div class="label">Pendencias</div>
@@ -304,20 +453,176 @@ function renderGridSkeleton() {
       <div class="fechamento-sticky-col fechamento-sector-cell fechamento-skeleton-text">Setor ${index + 1}</div>
       ${cells}
       <div class="fechamento-total-cell fechamento-skeleton-cell"></div>
+      <div class="fechamento-total-cell fechamento-skeleton-cell"></div>
     </div>
   `).join("");
 }
 
+function renderCellButton(cell) {
+  const meta = STATUS_META[cell.status] || STATUS_META.pendente;
+  return `
+    <button
+      type="button"
+      class="fechamento-cell fechamento-cell-${meta.tone} ${cell.isHistorical ? "fechamento-cell-historical" : ""}"
+      data-action="open-cell"
+      data-entry-id="${escapeHtml(cell.entryId || "")}"
+      data-store="${escapeHtml(cell.store)}"
+      data-year="${cell.year}"
+      data-month="${cell.month}"
+      data-type="${escapeHtml(cell.type)}"
+      data-type-group="${escapeHtml(cell.typeGroup || "")}"
+      data-sector="${escapeHtml(cell.sector)}"
+      data-status="${escapeHtml(cell.status)}"
+      data-observation="${escapeHtml(cell.observation || "")}"
+      data-total-value="${cell.totalValue}"
+      data-note-count="${cell.noteCount}"
+      data-is-historical="${cell.isHistorical ? "true" : "false"}"
+      data-source="${escapeHtml(cell.source || "")}"
+      data-detail-level="${escapeHtml(cell.detailLevel || "")}"
+    >
+      <strong>${brl(cell.totalValue)}</strong>
+      <span>${cell.isHistorical ? "consolidado" : `${cell.noteCount} nota(s)`}</span>
+      ${buildBadge(cell.status)}
+    </button>
+  `;
+}
+
+function renderClosingTable(table) {
+  const isHistoricalTable = table.rows.some((row) => row.months.some((cell) => cell.isHistorical && cell.totalValue > 0));
+  const head = `
+    <div class="fechamento-table-title fechamento-table-title-${table.tone}">
+      <h4>${escapeHtml(table.title)}</h4>
+      <span>${brl(table.totalValue)} no periodo</span>
+    </div>
+    <div class="fechamento-grid-head fechamento-grid-head-${table.tone}">
+      <div class="fechamento-sticky-col fechamento-head-cell">Setor</div>
+      ${MONTHS.map((month) => `<div class="fechamento-head-cell">${month.longLabel}</div>`).join("")}
+      <div class="fechamento-head-cell">M\u00e9dia</div>
+      <div class="fechamento-head-cell">Total</div>
+    </div>
+  `;
+
+  const body = table.rows.map((row) => `
+    <div class="fechamento-grid-row">
+      <div class="fechamento-sticky-col fechamento-sector-cell">
+        <strong>${escapeHtml(row.sector)}</strong>
+        <span>${isHistoricalTable ? "consolidado" : `${row.noteCount} nota(s)`}</span>
+      </div>
+      ${row.months.map(renderCellButton).join("")}
+      <div class="fechamento-total-cell fechamento-average-cell">
+        <strong>${brl(row.averageValue)}</strong>
+        <span>meses com valor</span>
+      </div>
+      <div class="fechamento-total-cell">
+        <strong>${brl(row.totalValue)}</strong>
+        <span>${isHistoricalTable ? "consolidado" : `${row.noteCount} nota(s)`}</span>
+      </div>
+    </div>
+  `).join("");
+
+  const footer = `
+    <div class="fechamento-grid-row fechamento-grid-footer fechamento-grid-footer-${table.tone}">
+      <div class="fechamento-sticky-col fechamento-sector-cell">
+        <strong>Total</strong>
+        <span>${isHistoricalTable ? "consolidado" : `${table.noteCount} nota(s)`}</span>
+      </div>
+      ${table.totalsByMonth.map((value) => `<div class="fechamento-footer-cell"><strong>${brl(value)}</strong></div>`).join("")}
+      <div class="fechamento-total-cell">
+        <strong>${brl(table.averageValue)}</strong>
+        <span>m\u00e9dia mensal</span>
+      </div>
+      <div class="fechamento-total-cell">
+        <strong>${brl(table.totalValue)}</strong>
+        <span>${isHistoricalTable ? "consolidado" : `${table.noteCount} nota(s)`}</span>
+      </div>
+    </div>
+  `;
+
+  return `<div class="fechamento-table-block fechamento-table-block-${table.tone}">${head}${body}${footer}</div>`;
+}
+
+function renderStoreSummaryCards(loja) {
+  const { summary } = loja;
+  return `
+    <div class="fechamento-store-kpis">
+      <article class="card kpi-card">
+        <div class="label">Total Perdas / Sa\u00eddas</div>
+        <div class="value">${brl(summary.totalPerdas)}</div>
+      </article>
+      <article class="card kpi-card">
+        <div class="label">Total Consumo</div>
+        <div class="value">${brl(summary.totalConsumo)}</div>
+      </article>
+      <article class="card kpi-card">
+        <div class="label">Total Geral da Loja</div>
+        <div class="value">${brl(summary.totalGeral)}</div>
+      </article>
+      <article class="card kpi-card">
+        <div class="label">Setor com maior perda</div>
+        <div class="value">${escapeHtml(summary.topLoss?.sector || "-")}</div>
+        <div class="meta">${brl(summary.topLoss?.totalValue || 0)}</div>
+      </article>
+      <article class="card kpi-card">
+        <div class="label">Setor com maior consumo</div>
+        <div class="value">${escapeHtml(summary.topUsage?.sector || "-")}</div>
+        <div class="meta">${brl(summary.topUsage?.totalValue || 0)}</div>
+      </article>
+    </div>
+  `;
+}
+
+function renderStoreBlock(loja) {
+  const isHistoricalStore = loja.tables.some((table) => table.rows.some((row) => row.months.some((cell) => cell.isHistorical && cell.totalValue > 0)));
+  return `
+    <section class="fechamento-store-block">
+      <div class="fechamento-store-head">
+        <div>
+          <span class="panel-tag">Fechamento Mensal ${escapeHtml(String(state.filters.year))}</span>
+          <h3>${escapeHtml(loja.loja)}</h3>
+          ${isHistoricalStore ? '<span class="fechamento-history-badge">Historico consolidado</span>' : ""}
+        </div>
+        <strong>${brl(loja.summary.totalGeral)}</strong>
+      </div>
+      ${renderStoreSummaryCards(loja)}
+      ${loja.tables.map(renderClosingTable).join("")}
+    </section>
+  `;
+}
+
+function renderQuickStoreFilter() {
+  if (!refs.quickStoreFilter) return;
+  const stores = sortLabels(new Set([
+    ...state.quickStores,
+    ...state.allRows.map((row) => row.store).filter(Boolean),
+    ...state.grid.lojas.map((loja) => loja.loja).filter(Boolean)
+  ]));
+  const options = ["TODAS", ...stores];
+  refs.quickStoreFilter.innerHTML = options.map((store) => {
+    const active = state.filters.store === store;
+    const label = store === "TODAS" ? "Todas as lojas" : store;
+    return `
+      <button
+        type="button"
+        class="fechamento-store-chip ${active ? "is-active" : ""}"
+        data-action="select-store-chip"
+        data-store="${escapeHtml(store)}"
+        aria-pressed="${active ? "true" : "false"}"
+      >${escapeHtml(label)}</button>
+    `;
+  }).join("");
+}
+
 function renderGrid() {
   renderSummary();
+  renderQuickStoreFilter();
 
-  if (state.loadingGrid && !state.grid.rows.length) {
+  if (state.loadingGrid && !state.grid.lojas?.length) {
     refs.gridState.innerHTML = "";
     renderGridSkeleton();
     return;
   }
 
-  if (state.gridError && !state.grid.rows.length) {
+  if (state.gridError && !state.grid.lojas?.length) {
     refs.gridState.innerHTML = `
       <div class="status error fechamento-state">
         <span>${escapeHtml(state.gridError)}</span>
@@ -330,7 +635,7 @@ function renderGrid() {
     return;
   }
 
-  if (!state.grid.summary.noteCount) {
+  if (!state.grid.summary.noteCount && !state.grid.summary.historicalCount && !state.grid.summary.totalValue) {
     refs.gridState.innerHTML = `
       <div class="empty">
         Nenhum fechamento encontrado para os filtros atuais.
@@ -343,65 +648,11 @@ function renderGrid() {
     return;
   }
 
-  refs.gridState.innerHTML = state.gridError ? `<div class="status warning">${escapeHtml(state.gridError)}</div>` : "";
-
-  const head = `
-    <div class="fechamento-grid-head">
-      <div class="fechamento-sticky-col fechamento-head-cell">Setor</div>
-      ${MONTHS.map((month) => `<div class="fechamento-head-cell">${month.shortLabel}</div>`).join("")}
-      <div class="fechamento-head-cell">Total</div>
-    </div>
-  `;
-
-  const body = state.grid.rows.map((row) => `
-    <div class="fechamento-grid-row">
-      <div class="fechamento-sticky-col fechamento-sector-cell">
-        <strong>${escapeHtml(row.sector)}</strong>
-        <span>${row.noteCount} nota(s)</span>
-      </div>
-      ${row.months.map((cell) => `
-        <button
-          type="button"
-          class="fechamento-cell fechamento-cell-${(STATUS_META[cell.status] || STATUS_META.pendente).tone}"
-          data-action="open-cell"
-          data-entry-id="${escapeHtml(cell.entryId || "")}"
-          data-store="${escapeHtml(cell.store)}"
-          data-year="${cell.year}"
-          data-month="${cell.month}"
-          data-type="${escapeHtml(cell.type)}"
-          data-sector="${escapeHtml(cell.sector)}"
-          data-status="${escapeHtml(cell.status)}"
-          data-observation="${escapeHtml(cell.observation || "")}"
-          data-total-value="${cell.totalValue}"
-          data-note-count="${cell.noteCount}"
-        >
-          <strong>${brl(cell.totalValue)}</strong>
-          <span>${cell.noteCount} nota(s)</span>
-          ${buildBadge(cell.status)}
-        </button>
-      `).join("")}
-      <div class="fechamento-total-cell">
-        <strong>${brl(row.totalValue)}</strong>
-        <span>${row.noteCount} nota(s)</span>
-      </div>
-    </div>
-  `).join("");
-
-  const footer = `
-    <div class="fechamento-grid-row fechamento-grid-footer">
-      <div class="fechamento-sticky-col fechamento-sector-cell">
-        <strong>Total geral</strong>
-        <span>${state.grid.summary.noteCount} nota(s)</span>
-      </div>
-      ${state.grid.totalsByMonth.map((value) => `<div class="fechamento-footer-cell"><strong>${brl(value)}</strong></div>`).join("")}
-      <div class="fechamento-total-cell">
-        <strong>${brl(state.grid.summary.totalValue)}</strong>
-        <span>${state.grid.summary.noteCount} nota(s)</span>
-      </div>
-    </div>
-  `;
-
-  refs.gridTable.innerHTML = `${head}${body}${footer}`;
+  const isHistoricalGrid = state.grid.summary.historicalCount > 0 && state.grid.summary.noteCount === 0;
+  refs.gridState.innerHTML = state.gridError
+    ? `<div class="status warning">${escapeHtml(state.gridError)}</div>`
+    : (isHistoricalGrid ? '<div class="fechamento-history-badge">Historico consolidado</div>' : "");
+  refs.gridTable.innerHTML = state.grid.lojas.map(renderStoreBlock).join("");
 }
 
 function setManagerStatus(type, message) {
@@ -853,13 +1104,22 @@ function renderNotesList() {
         data-action="select-note"
         data-note-key="${escapeHtml(note.noteKey)}"
       >
-        <div>
-          <strong>NF ${escapeHtml(note.invoice)}</strong>
-          <span>${escapeHtml(note.store)} - ${escapeHtml(formatDate(note.date))}</span>
+        <div class="fechamento-note-main">
+          <div class="fechamento-note-titleline">
+            <strong>NF ${escapeHtml(note.invoice)}</strong>
+            ${buildBadge(note.status)}
+          </div>
+          <div class="fechamento-note-tags">
+            <span>Competencia ${escapeHtml(note.competenceMonth || "-")}</span>
+            <span>Emissao ${escapeHtml(formatDate(note.date))}</span>
+            <span>${escapeHtml(note.type)}</span>
+            <span>${escapeHtml(note.sector)}</span>
+            ${note.classification ? `<span>${escapeHtml(note.classification)}</span>` : ""}
+          </div>
         </div>
-        <div class="cell-stack">
-          ${buildBadge(note.status)}
+        <div class="fechamento-note-metrics">
           <strong>${brl(note.totalValue)}</strong>
+          <span>${note.itemCount} item(ns)</span>
         </div>
       </button>
     `).join("")}
@@ -888,6 +1148,11 @@ function renderItemsPanel() {
     `;
   }
 
+  const pendingItems = state.noteItems.filter((item) => !item.reason);
+  const completedItems = state.noteItems.length - pendingItems.length;
+  const suggestedReason = note.classification || "";
+  const canApplySuggestion = Boolean(suggestedReason && pendingItems.length && !state.savingItems);
+
   return `
     <div class="fechamento-note-toolbar">
       <div class="cell-stack">
@@ -897,7 +1162,7 @@ function renderItemsPanel() {
       ${buildBadge(note.status)}
     </div>
 
-    <div class="fechamento-form-grid">
+    <div class="fechamento-form-grid fechamento-note-audit-grid">
       <label class="fechamento-field">
         <span>Status da nota</span>
         <select id="noteStatus">
@@ -905,6 +1170,10 @@ function renderItemsPanel() {
           <option value="confere" ${note.status === "confere" ? "selected" : ""}>Confere</option>
           <option value="divergente" ${note.status === "divergente" ? "selected" : ""}>Divergente</option>
         </select>
+      </label>
+      <label class="fechamento-field">
+        <span>Classificacao da nota</span>
+        <select id="noteClassification">${buildClassificationOptions(note.classification || "")}</select>
       </label>
       <label class="fechamento-field">
         <span>Observacao da nota</span>
@@ -917,6 +1186,18 @@ function renderItemsPanel() {
     </div>
     ${canPersistAudit(state.selectedCell) ? "" : '<div class="hint">Selecione uma loja e um tipo especificos para salvar auditoria manual.</div>'}
 
+    <div class="fechamento-items-actions">
+      <div class="cell-stack">
+        <span class="label">Classificacao dos produtos</span>
+        <strong>${completedItems}/${state.noteItems.length} produto(s) com motivo</strong>
+        ${suggestedReason ? `<span class="hint">Sugestao da nota: ${escapeHtml(suggestedReason)}</span>` : '<span class="hint">Defina uma classificacao na nota para sugerir motivos aos produtos pendentes.</span>'}
+      </div>
+      <div class="fechamento-inline">
+        <button type="button" data-action="apply-note-classification-to-items" ${canApplySuggestion ? "" : "disabled"}>Aplicar aos sem motivo</button>
+        <button type="button" data-action="save-all-item-reasons" ${(state.savingItems || !state.noteItems.length) ? "disabled" : ""}>${state.savingItems ? "Salvando..." : "Salvar todos"}</button>
+      </div>
+    </div>
+
     <div class="table-wrap fechamento-items-table">
       <table>
         <thead>
@@ -926,18 +1207,42 @@ function renderItemsPanel() {
             <th>Qtd</th>
             <th>Valor</th>
             <th>Motivo</th>
+            <th>Ação</th>
           </tr>
         </thead>
         <tbody>
-          ${state.noteItems.length ? state.noteItems.map((item) => `
-            <tr>
+          ${state.noteItems.length ? state.noteItems.map((item) => {
+            const isComplete = Boolean(item.reason);
+            const selectedReason = item.reason || suggestedReason || "";
+            const savingThisItem = state.savingItemIds.has(item.id);
+            return `
+            <tr class="fechamento-item-row ${isComplete ? "is-complete" : "is-pending"}">
               <td>${item.itemIndex}</td>
-              <td>${escapeHtml(item.product)}</td>
+              <td>
+                <div class="cell-stack">
+                  <strong>${escapeHtml(item.product)}</strong>
+                  ${isComplete ? '<span class="status-badge success">Concluido</span>' : '<span class="status-badge warning">Sem motivo salvo</span>'}
+                </div>
+              </td>
               <td>${num(item.quantity)}</td>
               <td>${brl(item.value)}</td>
-              <td>${escapeHtml(item.reason || "Sem motivo")}</td>
+              <td>
+                <div class="cell-stack">
+                  <select
+                    class="fechamento-item-reason-select ${isComplete ? "is-saved" : "is-pending"}"
+                    data-action="set-item-reason"
+                    data-item-id="${escapeHtml(item.id)}"
+                    data-saved-reason="${escapeHtml(item.reason || "")}"
+                  >${buildItemReasonOptions(item.reason || "", suggestedReason)}</select>
+                  <span class="row-meta">${isComplete ? "Motivo salvo" : (selectedReason ? "Sugestao pronta para salvar" : "Selecione um motivo")}</span>
+                </div>
+              </td>
+              <td>
+                <button type="button" data-action="save-item-reason" data-item-id="${escapeHtml(item.id)}" ${savingThisItem ? "disabled" : ""}>${savingThisItem ? "Salvando..." : "Salvar"}</button>
+              </td>
             </tr>
-          `).join("") : '<tr><td colspan="5">Nenhum item encontrado para esta nota.</td></tr>'}
+          `;
+          }).join("") : '<tr><td colspan="6">Nenhum item encontrado para esta nota.</td></tr>'}
         </tbody>
       </table>
     </div>
@@ -956,6 +1261,45 @@ function renderDrawer() {
     <span>${escapeHtml(state.selectedCell.type === "TODOS" ? "Todos os tipos" : state.selectedCell.type)}</span>
     <span>${brl(state.selectedCell.totalValue)}</span>
   `;
+
+  if (state.selectedCell.isHistorical) {
+    refs.drawerBody.innerHTML = `
+      <div class="fechamento-history-detail">
+        <span class="fechamento-history-badge">Historico consolidado</span>
+        <section class="fechamento-panel">
+          <div class="fechamento-summary-grid">
+            <div class="summary-card">
+              <div class="label">Loja</div>
+              <strong>${escapeHtml(state.selectedCell.store)}</strong>
+            </div>
+            <div class="summary-card">
+              <div class="label">Setor</div>
+              <strong>${escapeHtml(state.selectedCell.sector)}</strong>
+            </div>
+            <div class="summary-card">
+              <div class="label">Mes</div>
+              <strong>${escapeHtml(state.selectedCell.monthLabel)}</strong>
+            </div>
+            <div class="summary-card">
+              <div class="label">Tipo</div>
+              <strong>${escapeHtml(state.selectedCell.type)}</strong>
+            </div>
+            <div class="summary-card">
+              <div class="label">Valor</div>
+              <strong>${brl(state.selectedCell.totalValue)}</strong>
+            </div>
+            <div class="summary-card">
+              <div class="label">Origem</div>
+              <strong>${escapeHtml(state.selectedCell.source || "planilha_historica")}</strong>
+            </div>
+          </div>
+          <div class="status info">Histórico consolidado importado de planilha antiga. Sem detalhamento por nota ou produto.</div>
+          ${state.selectedCell.observation ? `<div class="summary-card"><div class="label">Observacoes</div><strong>${escapeHtml(state.selectedCell.observation)}</strong></div>` : ""}
+        </section>
+      </div>
+    `;
+    return;
+  }
 
   refs.drawerBody.innerHTML = `
     <div class="fechamento-drawer-layout">
@@ -1021,30 +1365,51 @@ function renderDrawer() {
 }
 
 function patchGridCell(updatedCell) {
-  state.grid.rows = state.grid.rows.map((row) => {
-    if (row.sector !== updatedCell.sector) return row;
-    const months = row.months.map((cell) => cell.month === updatedCell.month ? { ...cell, ...updatedCell } : cell);
-    return {
-      ...row,
-      months,
-      totalValue: months.reduce((sum, cell) => sum + Number(cell.totalValue || 0), 0),
-      noteCount: months.reduce((sum, cell) => sum + Number(cell.noteCount || 0), 0)
-    };
-  });
-  state.grid = {
-    ...state.grid,
-    totalsByMonth: MONTHS.map((month) => state.grid.rows.reduce((sum, row) => sum + Number(row.months[month.number - 1].totalValue || 0), 0)),
-    summary: state.grid.rows.reduce((acc, row) => {
-      row.months.forEach((cell) => {
-        acc.totalValue += cell.totalValue;
-        acc.noteCount += cell.noteCount;
-        if (cell.status === "pendente") acc.pendingCount += 1;
-        if (cell.status === "divergente") acc.divergentCount += 1;
-        if (cell.status === "confere") acc.checkedCount += 1;
+  state.grid.lojas = state.grid.lojas.map((loja) => {
+    if (loja.loja !== updatedCell.store) return loja;
+    const tables = loja.tables.map((table) => {
+      if (table.key !== updatedCell.typeGroup) return table;
+      const rows = table.rows.map((row) => {
+        if (row.sector !== updatedCell.sector) return row;
+        const months = row.months.map((cell) => cell.month === updatedCell.month ? { ...cell, ...updatedCell } : cell);
+        const monthValues = months.map((cell) => Number(cell.totalValue || 0));
+        return {
+          ...row,
+          months,
+          averageValue: positiveMonthAverage(monthValues),
+          totalValue: monthValues.reduce((sum, value) => sum + value, 0),
+          noteCount: months.reduce((sum, cell) => sum + Number(cell.noteCount || 0), 0)
+        };
       });
-      return acc;
-    }, defaultSummary())
-  };
+      const totalsByMonth = MONTHS.map((month) => rows.reduce((sum, row) => sum + Number(row.months[month.number - 1].totalValue || 0), 0));
+      return {
+        ...table,
+        rows,
+        totalsByMonth,
+        totalValue: totalsByMonth.reduce((sum, value) => sum + value, 0),
+        averageValue: positiveMonthAverage(totalsByMonth),
+        noteCount: rows.reduce((sum, row) => sum + row.noteCount, 0)
+      };
+    });
+    const model = { ...loja, tables };
+    return { ...model, summary: buildStoreSummary(model) };
+  });
+  state.grid.summary = state.grid.lojas.reduce((acc, loja) => {
+    loja.tables.forEach((table) => {
+      table.rows.forEach((row) => {
+        row.months.forEach((cell) => {
+          acc.totalValue += cell.totalValue;
+          acc.noteCount += cell.noteCount;
+          if (cell.isHistorical && cell.totalValue > 0) acc.historicalCount += 1;
+          if (cell.status === "pendente") acc.pendingCount += 1;
+          if (cell.status === "divergente") acc.divergentCount += 1;
+          if (cell.status === "confere") acc.checkedCount += 1;
+        });
+      });
+    });
+    return acc;
+  }, defaultSummary());
+  state.grid.totalsByMonth = MONTHS.map((month) => state.grid.lojas.reduce((storeSum, loja) => storeSum + loja.tables.reduce((tableSum, table) => tableSum + Number(table.totalsByMonth[month.number - 1] || 0), 0), 0));
 }
 
 function parseCell(button) {
@@ -1055,11 +1420,15 @@ function parseCell(button) {
     month: Number(button.dataset.month || 0),
     monthLabel: monthMeta(button.dataset.month).longLabel,
     type: button.dataset.type,
+    typeGroup: button.dataset.typeGroup || classifyClosingType(button.dataset.type),
     sector: button.dataset.sector,
     status: button.dataset.status || "pendente",
     observation: button.dataset.observation || "",
     totalValue: Number(button.dataset.totalValue || 0),
-    noteCount: Number(button.dataset.noteCount || 0)
+    noteCount: Number(button.dataset.noteCount || 0),
+    isHistorical: button.dataset.isHistorical === "true",
+    source: button.dataset.source || "",
+    detailLevel: button.dataset.detailLevel || ""
   };
 }
 
@@ -1070,13 +1439,20 @@ async function loadGrid({ silent = false } = {}) {
     renderGrid();
     const rows = await fetchGrid(state.filters);
     state.allRows = rows;
+    const stores = rows.map((row) => row.store).filter(Boolean);
+    state.quickStores = state.filters.store === "TODAS"
+      ? sortLabels(new Set(stores))
+      : sortLabels(new Set([...state.quickStores, ...stores, state.filters.store].filter(Boolean)));
     state.grid = buildGridModel(rows);
     console.log("[Fechamento] Linhas da view carregadas:", rows.length);
     console.log("[Fechamento] Filtros ativos:", state.filters);
     console.log("[Fechamento] Total de notas na grade:", state.grid.summary.noteCount);
     state.gridError = "";
     renderGrid();
-    setStatus("success", `${state.grid.summary.noteCount} nota(s) posicionadas na grade mensal.`);
+    const historicalOnly = state.grid.summary.historicalCount > 0 && state.grid.summary.noteCount === 0;
+    setStatus("success", historicalOnly
+      ? `${state.grid.summary.historicalCount} registro(s) historicos consolidados carregados.`
+      : `${state.grid.summary.noteCount} nota(s) posicionadas na grade mensal.`);
   } catch (error) {
     console.error(error);
     state.gridError = error.userMessage || error.message || "Falha ao carregar a grade do fechamento.";
@@ -1127,6 +1503,8 @@ async function loadItems(noteKey) {
     state.selectedNoteKey = noteKey;
     state.itemsLoading = true;
     state.itemsError = "";
+    state.savingItems = false;
+    state.savingItemIds.clear();
     renderDrawer();
     state.noteItems = await fetchNoteItems(noteKey);
   } catch (error) {
@@ -1135,6 +1513,113 @@ async function loadItems(noteKey) {
     state.noteItems = [];
   } finally {
     state.itemsLoading = false;
+    renderDrawer();
+  }
+}
+
+function getSelectedNote() {
+  return state.notes.find((entry) => entry.noteKey === state.selectedNoteKey) || null;
+}
+
+function collectItemReasonUpdates({ onlyWithReason = false } = {}) {
+  return [...refs.drawerBody.querySelectorAll("[data-action='set-item-reason']")]
+    .map((select) => ({
+      id: select.dataset.itemId,
+      reason: select.value || ""
+    }))
+    .filter((item) => item.id && (!onlyWithReason || item.reason));
+}
+
+function patchItemReasons(savedItems) {
+  const reasonById = new Map(savedItems.map((item) => [item.id, item.reason || ""]));
+  state.noteItems = state.noteItems.map((item) => reasonById.has(item.id) ? {
+    ...item,
+    reason: reasonById.get(item.id)
+  } : item);
+  state.manager.items = state.manager.items.map((item) => reasonById.has(item.id) ? {
+    ...item,
+    reason: reasonById.get(item.id)
+  } : item);
+}
+
+function updateItemReasonRow(select) {
+  const row = select.closest(".fechamento-item-row");
+  if (!row) return;
+  const savedReason = select.dataset.savedReason || "";
+  const currentReason = select.value || "";
+  row.classList.toggle("is-complete", Boolean(savedReason));
+  row.classList.toggle("is-pending", !savedReason);
+  row.classList.toggle("has-unsaved-reason", currentReason !== savedReason);
+  const meta = row.querySelector(".row-meta");
+  if (meta) {
+    meta.textContent = savedReason
+      ? (currentReason !== savedReason ? "Alteracao pendente" : "Motivo salvo")
+      : (currentReason ? "Pronto para salvar" : "Selecione um motivo");
+  }
+}
+
+function applyNoteClassificationToItems() {
+  const note = getSelectedNote();
+  const reason = note?.classification || "";
+  if (!reason) {
+    showToast("warning", "Defina uma classificacao na nota antes de aplicar aos produtos.");
+    return;
+  }
+
+  let applied = 0;
+  refs.drawerBody.querySelectorAll("[data-action='set-item-reason']").forEach((select) => {
+    if (select.dataset.savedReason) return;
+    select.value = reason;
+    updateItemReasonRow(select);
+    applied += 1;
+  });
+
+  showToast(applied ? "success" : "info", applied ? "Classificacao aplicada aos produtos sem motivo. Revise e salve todos." : "Todos os produtos ja possuem motivo salvo.");
+}
+
+async function saveSingleItemReason(itemId) {
+  const select = [...refs.drawerBody.querySelectorAll("[data-action='set-item-reason']")].find((field) => field.dataset.itemId === itemId);
+  const reason = select?.value || "";
+  if (!reason) {
+    showToast("warning", "Selecione um motivo antes de salvar o produto.");
+    return;
+  }
+
+  try {
+    state.savingItemIds.add(itemId);
+    renderDrawer();
+    const saved = await saveItemReason(itemId, reason);
+    patchItemReasons([saved]);
+    renderDrawer();
+    showToast("success", "Motivo do produto salvo.");
+  } catch (error) {
+    console.error(error);
+    showToast("error", error.userMessage || "Nao foi possivel salvar o motivo do produto.");
+  } finally {
+    state.savingItemIds.delete(itemId);
+    renderDrawer();
+  }
+}
+
+async function saveAllItemReasons() {
+  const updates = collectItemReasonUpdates({ onlyWithReason: true });
+  if (!updates.length) {
+    showToast("warning", "Selecione ao menos um motivo para salvar.");
+    return;
+  }
+
+  try {
+    state.savingItems = true;
+    renderDrawer();
+    const saved = await saveItemReasons(updates);
+    patchItemReasons(saved);
+    renderDrawer();
+    showToast("success", `${saved.length} motivo(s) de produto salvos.`);
+  } catch (error) {
+    console.error(error);
+    showToast("error", error.userMessage || "Nao foi possivel salvar os motivos dos produtos.");
+  } finally {
+    state.savingItems = false;
     renderDrawer();
   }
 }
@@ -1150,7 +1635,10 @@ function openDrawerFromCell(button) {
   state.selectedNoteKey = "";
   state.noteItems = [];
   state.itemsError = "";
+  state.savingItems = false;
+  state.savingItemIds.clear();
   renderDrawer();
+  if (state.selectedCell.isHistorical) return;
   loadNotes();
 }
 
@@ -1160,6 +1648,8 @@ function closeDrawer() {
   state.notes = [];
   state.selectedNoteKey = "";
   state.noteItems = [];
+  state.savingItems = false;
+  state.savingItemIds.clear();
   renderDrawer();
 }
 
@@ -1202,6 +1692,7 @@ async function saveNote() {
   }
 
   const nextStatus = document.getElementById("noteStatus")?.value || "pendente";
+  const nextClassification = document.getElementById("noteClassification")?.value || "";
   const nextObservation = document.getElementById("noteObservation")?.value || "";
 
   try {
@@ -1211,12 +1702,14 @@ async function saveNote() {
       cell: state.selectedCell,
       noteKey: state.selectedNoteKey,
       status: nextStatus,
+      classification: nextClassification,
       observation: nextObservation
     });
 
     state.notes = state.notes.map((note) => note.noteKey === state.selectedNoteKey ? {
       ...note,
       status: noteResult.status,
+      classification: noteResult.classification,
       observation: noteResult.observation
     } : note);
 
@@ -1250,6 +1743,7 @@ async function saveNote() {
 
 function syncFiltersFromData() {
   const stores = sortLabels(new Set(state.allRows.map((row) => row.store).filter(Boolean)));
+  state.quickStores = sortLabels(new Set([...state.quickStores, ...stores]));
   const years = buildYearOptions(state.allRows);
   const types = sortLabels(new Set(state.allRows.map((row) => row.type).filter(Boolean)));
 
@@ -1258,6 +1752,7 @@ function syncFiltersFromData() {
   fillSelect(refs.typeFilter, ["TODOS", ...types], state.filters.type, (value) => value === "TODOS" ? "Todos os tipos" : value);
   fillSelect(refs.statusFilter, ["TODOS", "confere", "pendente", "divergente", "sem_nota"], state.filters.status, (value) => value === "TODOS" ? "Todos os status" : (STATUS_META[value] || STATUS_META.pendente).label);
   refs.metaYear.textContent = String(state.filters.year);
+  renderQuickStoreFilter();
 }
 
 function syncManagerFiltersFromData() {
@@ -1410,6 +1905,15 @@ function bindEvents() {
     loadGrid();
   });
 
+  refs.quickStoreFilter?.addEventListener("click", (event) => {
+    const button = event.target.closest('[data-action="select-store-chip"]');
+    if (!button) return;
+    state.filters.store = button.dataset.store || "TODAS";
+    refs.storeFilter.value = state.filters.store;
+    renderQuickStoreFilter();
+    loadGrid({ silent: true });
+  });
+
   refs.gridState.addEventListener("click", (event) => {
     const action = event.target.closest("[data-action]");
     if (!action) return;
@@ -1453,7 +1957,24 @@ function bindEvents() {
     }
     if (action.dataset.action === "save-note") {
       await saveNote();
+      return;
     }
+    if (action.dataset.action === "apply-note-classification-to-items") {
+      applyNoteClassificationToItems();
+      return;
+    }
+    if (action.dataset.action === "save-item-reason") {
+      await saveSingleItemReason(action.dataset.itemId);
+      return;
+    }
+    if (action.dataset.action === "save-all-item-reasons") {
+      await saveAllItemReasons();
+    }
+  });
+
+  refs.drawerBody.addEventListener("change", (event) => {
+    const select = event.target.closest("[data-action='set-item-reason']");
+    if (select) updateItemReasonRow(select);
   });
 
   [

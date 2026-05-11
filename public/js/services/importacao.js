@@ -728,6 +728,24 @@ export async function updateSectorForNote(noteKey, type, sector) {
   );
 }
 
+export async function updateCompetenceMonthForNote(noteKey, competenceMonth) {
+  return withLocalFallback(
+    async () => {
+      const client = getSupabaseClient();
+      const { error: noteError } = await client.from(TABLES.notes).update({ competence_month: competenceMonth }).eq("note_key", noteKey);
+      if (noteError) throw noteError;
+      const { error: itemError } = await client.from(TABLES.items).update({ competence_month: competenceMonth }).eq("note_key", noteKey);
+      if (itemError) throw itemError;
+    },
+    async () => {
+      const database = readLocalDatabase();
+      database.notes = (database.notes || []).map((row) => row.note_key === noteKey ? { ...row, competence_month: competenceMonth } : row);
+      database.items = (database.items || []).map((row) => row.note_key === noteKey ? { ...row, competence_month: competenceMonth } : row);
+      writeLocalDatabase(database);
+    }
+  );
+}
+
 export async function deleteNote(noteKey) {
   return withLocalFallback(
     async () => {

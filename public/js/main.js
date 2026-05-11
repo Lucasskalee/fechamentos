@@ -1,5 +1,5 @@
 import { groupItemsByNote, normalizeReason } from "./services/classificacao.js";
-import { clearDatabase, deleteNote, getPersistenceInfo, importXmlFiles, loadAllData, updateItemField, updateReasonForNote, updateSectorForNote } from "./services/importacao.js";
+import { clearDatabase, deleteNote, getPersistenceInfo, importXmlFiles, loadAllData, updateCompetenceMonthForNote, updateItemField, updateReasonForNote, updateSectorForNote } from "./services/importacao.js";
 import { applyFilters, buildNoteOptions, refreshFilters } from "./services/filtros.js";
 import { exportCsv, openPrintReport, renderClassification, renderDashboard, renderItems } from "./services/dashboard.js";
 import { subscribeRealtime } from "./services/realtime.js";
@@ -532,6 +532,27 @@ function bindEvents() {
         showToast("success", "Setor salvo com sucesso.");
       } catch (error) {
         setStatus("error", error.userMessage || "Nao foi possivel atualizar o setor.");
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
+    if (action === "save-competence-month") {
+      const monthField = document.getElementById("noteCompetenceMonthEdit");
+      if (!monthField) return;
+      const nextMonth = monthField.value;
+      try {
+        setLoading(true, "Atualizando mes de competencia da nota...");
+        await updateCompetenceMonthForNote(noteKey, nextMonth);
+        await reloadFromDatabase({ statusMessage: "Mes de competencia atualizado automaticamente." });
+        if ([...refs.noteMonthFilter.options].some((option) => option.value === nextMonth)) refs.noteMonthFilter.value = nextMonth;
+        buildNoteOptions(state, refs);
+        refs.noteSelect.value = noteKey;
+        renderClassification(state, refs);
+        showToast("success", "Mes da nota salvo com sucesso.");
+      } catch (error) {
+        setStatus("error", error.userMessage || "Nao foi possivel atualizar o mes da nota.");
       } finally {
         setLoading(false);
       }

@@ -26,11 +26,15 @@ create table if not exists public.monthly_closing_notes (
   note_key text not null references public.loss_notes(note_key) on delete cascade,
   status text not null default 'pendente' check (status in ('pendente', 'confere', 'divergente')),
   observation text not null default '',
+  classification text,
   checked_at timestamptz,
   created_at timestamptz not null default timezone('utc', now()),
   updated_at timestamptz not null default timezone('utc', now()),
   unique (entry_id, note_key)
 );
+
+alter table public.monthly_closing_notes
+  add column if not exists classification text;
 
 create table if not exists public.monthly_closing_observations (
   id uuid primary key default gen_random_uuid(),
@@ -40,6 +44,21 @@ create table if not exists public.monthly_closing_observations (
   message text not null,
   created_by text,
   created_at timestamptz not null default timezone('utc', now())
+);
+
+create table if not exists public.historical_closing_entries (
+  id uuid primary key default gen_random_uuid(),
+  year integer not null check (year between 2020 and 2100),
+  month_number integer not null check (month_number between 1 and 12),
+  store_name text not null,
+  entry_type text not null check (entry_type in ('perdas_saidas', 'uso_consumo')),
+  sector text not null,
+  amount numeric(14,2) not null default 0,
+  source text not null default 'planilha_historica',
+  detail_level text not null default 'consolidado_mensal',
+  notes text,
+  created_at timestamptz not null default timezone('utc', now()),
+  updated_at timestamptz not null default timezone('utc', now())
 );
 
 create or replace function public.set_updated_at()
@@ -62,11 +81,19 @@ create trigger trg_monthly_closing_notes_updated_at
 before update on public.monthly_closing_notes
 for each row execute procedure public.set_updated_at();
 
+drop trigger if exists trg_historical_closing_entries_updated_at on public.historical_closing_entries;
+create trigger trg_historical_closing_entries_updated_at
+before update on public.historical_closing_entries
+for each row execute procedure public.set_updated_at();
+
 create index if not exists idx_loss_notes_monthly_lookup
   on public.loss_notes(store, type, sector, emission_date);
 
 create index if not exists idx_loss_items_note_lookup
   on public.loss_items(note_key, item_index);
+
+create index if not exists idx_loss_items_reason_analysis
+  on public.loss_items(competence_month, store, sector, reason, product);
 
 create index if not exists idx_monthly_closing_entries_lookup
   on public.monthly_closing_entries(store, year, month_number, sector, type, status);
@@ -76,6 +103,27 @@ create index if not exists idx_monthly_closing_notes_entry
 
 create index if not exists idx_monthly_closing_notes_note_key
   on public.monthly_closing_notes(note_key);
+
+create index if not exists idx_monthly_closing_notes_classification
+  on public.monthly_closing_notes(classification);
+
+create index if not exists idx_historical_closing_entries_year
+  on public.historical_closing_entries(year);
+
+create index if not exists idx_historical_closing_entries_store
+  on public.historical_closing_entries(store_name);
+
+create index if not exists idx_historical_closing_entries_type
+  on public.historical_closing_entries(entry_type);
+
+create index if not exists idx_historical_closing_entries_sector
+  on public.historical_closing_entries(sector);
+
+create index if not exists idx_historical_closing_entries_lookup
+  on public.historical_closing_entries(year, month_number, store_name, entry_type, sector);
+
+create unique index if not exists historical_closing_entries_unique_import
+  on public.historical_closing_entries(year, month_number, store_name, entry_type, sector);
 
 create or replace view public.v_monthly_closing_grid as
 select
@@ -124,6 +172,7 @@ select
   ln.item_count,
   coalesce(n.status, 'pendente') as note_status,
   coalesce(n.observation, '') as note_observation,
+  coalesce(n.classification, '') as note_classification,
   coalesce(e.status, 'pendente') as entry_status,
   coalesce(e.observation, '') as entry_observation
 from public.loss_notes ln
@@ -138,9 +187,30 @@ left join public.monthly_closing_notes n
  and n.note_key = ln.note_key
 where ln.emission_date is not null;
 
+create or replace view public.v_historical_closing_grid as
+select
+  (array_agg(id order by created_at))[1] as id,
+  year,
+  month_number,
+  store_name,
+  entry_type,
+  sector,
+  coalesce(sum(amount), 0)::numeric(14,2) as total_amount,
+  min(source) as source,
+  min(detail_level) as detail_level,
+  string_agg(nullif(notes, ''), ' | ' order by created_at) as notes
+from public.historical_closing_entries
+group by
+  year,
+  month_number,
+  store_name,
+  entry_type,
+  sector;
+
 alter table public.monthly_closing_entries enable row level security;
 alter table public.monthly_closing_notes enable row level security;
 alter table public.monthly_closing_observations enable row level security;
+alter table public.historical_closing_entries enable row level security;
 
 drop policy if exists "anon_can_read_monthly_closing_entries" on public.monthly_closing_entries;
 create policy "anon_can_read_monthly_closing_entries" on public.monthly_closing_entries for select to anon using (true);
@@ -165,3 +235,12 @@ create policy "anon_can_read_monthly_closing_observations" on public.monthly_clo
 
 drop policy if exists "anon_can_insert_monthly_closing_observations" on public.monthly_closing_observations;
 create policy "anon_can_insert_monthly_closing_observations" on public.monthly_closing_observations for insert to anon with check (true);
+
+drop policy if exists "anon_can_read_historical_closing_entries" on public.historical_closing_entries;
+create policy "anon_can_read_historical_closing_entries" on public.historical_closing_entries for select to anon using (true);
+
+drop policy if exists "anon_can_insert_historical_closing_entries" on public.historical_closing_entries;
+create policy "anon_can_insert_historical_closing_entries" on public.historical_closing_entries for insert to anon with check (true);
+
+drop policy if exists "anon_can_update_historical_closing_entries" on public.historical_closing_entries;
+create policy "anon_can_update_historical_closing_entries" on public.historical_closing_entries for update to anon using (true) with check (true);

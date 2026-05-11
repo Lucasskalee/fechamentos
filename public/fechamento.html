@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="./styles.css?v=20260428-2">
-  <link rel="stylesheet" href="./fechamento.css?v=20260428-2">
+  <link rel="stylesheet" href="./fechamento.css?v=20260511-3">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
@@ -98,6 +98,8 @@
             <button id="refreshBtn" type="button">Atualizar grade</button>
             <button id="clearBtn" type="button">Limpar filtros</button>
           </div>
+
+          <div id="quickStoreFilter" class="fechamento-store-switch" aria-label="Atalho de lojas"></div>
 
           <div class="status-shell">
             <div id="statusBanner" class="status info">Carregando fechamento mensal...</div>
@@ -307,6 +309,6 @@
 
   <div id="toast" class="toast" hidden></div>
 
-  <script type="module" src="./js/fechamento.js?v=20260428-2"></script>
+  <script type="module" src="./js/fechamento.js?v=20260511-3"></script>
 </body>
 </html>
